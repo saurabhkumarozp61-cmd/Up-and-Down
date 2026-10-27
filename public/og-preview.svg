@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090D16" />
+      <stop offset="50%" stop-color="#131B2E" />
+      <stop offset="100%" stop-color="#090D16" />
+    </linearGradient>
+    <linearGradient id="yesGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+    <linearGradient id="noGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#F43F5E" />
+      <stop offset="100%" stop-color="#E11D48" />
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)" />
+  <rect x="60" y="60" width="1080" height="510" rx="32" fill="#131B2E" stroke="#1E293B" stroke-width="3" />
+  <text x="120" y="150" fill="#10B981" font-family="sans-serif" font-size="28" font-weight="bold" letter-spacing="2">UP &amp; DOWN • INDIA GEN-Z PREDICTION MARKET</text>
+  <text x="120" y="250" fill="#FFFFFF" font-family="sans-serif" font-size="58" font-weight="bold">Predict &amp; Outsmart Your Campus</text>
+  <text x="120" y="325" fill="#94A3B8" font-family="sans-serif" font-size="34">Claim 1,000 Free Virtual Coins • Compete in College Wars</text>
+  <rect x="120" y="390" width="580" height="28" rx="14" fill="url(#yesGrad)" />
+  <rect x="715" y="390" width="365" height="28" rx="14" fill="url(#noGrad)" />
+  <text x="120" y="475" fill="#10B981" font-family="monospace" font-size="32" font-weight="bold">YES 62% • IPL, Campus Fests, Tech &amp; Creators</text>
+</svg>

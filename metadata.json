@@ -1,0 +1,6 @@
+{
+  "name": "CampusOdds — Social Prediction Market",
+  "description": "Predict & Outsmart Your Campus — Claim 1,000 Free Coins. The social prediction market for Indian Gen-Z & college communities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
