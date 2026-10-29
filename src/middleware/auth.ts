@@ -1,38 +1,52 @@
+import 'dotenv/config';
 import type { Request, Response, NextFunction } from 'express';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
-
-function loadFirebaseConfig(): { projectId?: string } {
-  try {
-    const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-    if (fs.existsSync(configPath)) {
-      return JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    }
-    const urlPath = new URL('../../firebase-applet-config.json', import.meta.url);
-    return JSON.parse(fs.readFileSync(urlPath, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-const firebaseConfig = loadFirebaseConfig();
 
 export interface AuthUserPayload {
   uid: string;
   email: string;
   username?: string;
+  emailVerified?: boolean;
 }
 
 export interface AuthRequest extends Request {
   user?: AuthUserPayload;
 }
 
-const SESSION_SECRET = process.env.SESSION_SECRET || 'campusodds-inapp-webview-secret-2026';
+const configuredSessionSecret = process.env.SESSION_SECRET?.trim();
+const isProductionRuntime =
+  process.env.NODE_ENV === 'production' ||
+  process.env.npm_lifecycle_event === 'start' ||
+  process.cwd().startsWith('/srv');
+const sessionSecretIsStrong =
+  Boolean(configuredSessionSecret) &&
+  configuredSessionSecret!.length >= 32 &&
+  configuredSessionSecret !== 'campusodds-inapp-webview-secret-2026';
+
+if (isProductionRuntime && !sessionSecretIsStrong) {
+  throw new Error(
+    'SESSION_SECRET must be configured with at least 32 characters before production authentication can start.'
+  );
+}
+
+// Local development gets a per-process secret rather than a source-visible default.
+// It intentionally invalidates local sessions after a server restart.
+const SESSION_SECRET = sessionSecretIsStrong
+  ? configuredSessionSecret!
+  : crypto.randomBytes(32).toString('base64url');
 
 export function createInAppToken(payload: AuthUserPayload): string {
-  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  if (!payload.uid || !payload.email) {
+    throw new Error('An authenticated user ID and email are required.');
+  }
+  const data = Buffer.from(
+    JSON.stringify({
+      uid: payload.uid,
+      email: payload.email,
+      username: payload.username,
+    })
+  ).toString('base64url');
   const sig = crypto
     .createHmac('sha256', SESSION_SECRET)
     .update(data)
@@ -45,32 +59,36 @@ export function verifyInAppToken(token: string): AuthUserPayload | null {
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [, data, sig] = parts;
-  const expectedSig = crypto
-    .createHmac('sha256', SESSION_SECRET)
-    .update(data)
-    .digest('base64url');
-  if (sig !== expectedSig) return null;
-  try {
-    return JSON.parse(Buffer.from(data, 'base64url').toString('utf-8')) as AuthUserPayload;
-  } catch {
+  if (!/^[A-Za-z0-9_-]+$/.test(sig)) return null;
+
+  const expectedBytes = Buffer.from(
+    crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url'),
+    'base64url'
+  );
+  const suppliedBytes = Buffer.from(sig, 'base64url');
+  if (
+    expectedBytes.length !== suppliedBytes.length ||
+    !crypto.timingSafeEqual(expectedBytes, suppliedBytes)
+  ) {
     return null;
   }
-}
 
-function decodeExpiredFirebaseJwt(token: string): AuthUserPayload | null {
   try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
-    const uid = payload.user_id || payload.sub;
-    if (!uid) return null;
-    if (firebaseConfig.projectId && payload.aud && payload.aud !== firebaseConfig.projectId) {
+    const payload = JSON.parse(
+      Buffer.from(data, 'base64url').toString('utf-8')
+    ) as Partial<AuthUserPayload>;
+    if (
+      typeof payload.uid !== 'string' ||
+      !payload.uid ||
+      typeof payload.email !== 'string' ||
+      !payload.email
+    ) {
       return null;
     }
     return {
-      uid: String(uid),
-      email: payload.email ? String(payload.email) : `${uid}@campusodds.in`,
-      username: payload.name ? String(payload.name) : undefined,
+      uid: payload.uid,
+      email: payload.email,
+      username: typeof payload.username === 'string' ? payload.username : undefined,
     };
   } catch {
     return null;
@@ -87,33 +105,32 @@ export const requireAuth = async (
     return res.status(401).json({ error: 'Unauthorized: Missing authentication token' });
   }
 
-  const token = authHeader.split('Bearer ')[1];
+  const token = authHeader.slice('Bearer '.length).trim();
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized: Missing authentication token' });
+  }
 
-  // 1. Check In-App Browser Email/Password, Telegram, or Upgraded session token
   const inAppUser = verifyInAppToken(token);
   if (inAppUser) {
     req.user = inAppUser;
     return next();
   }
 
-  // 2. Verify Firebase ID Token (with seamless recovery if the cached 1-hour Firebase JWT expired)
   try {
     const decodedToken = await adminAuth.verifyIdToken(token);
+    if (!decodedToken.email || decodedToken.email_verified !== true) {
+      return res.status(401).json({ error: 'Unauthorized: Verified email required' });
+    }
     req.user = {
       uid: decodedToken.uid,
-      email: decodedToken.email || `${decodedToken.uid}@campusodds.in`,
+      email: decodedToken.email,
       username: decodedToken.name,
+      emailVerified: decodedToken.email_verified,
     };
     return next();
-  } catch (error: any) {
-    if (error?.code === 'auth/id-token-expired' || String(error?.message || '').includes('id-token-expired')) {
-      const recoveredUser = decodeExpiredFirebaseJwt(token);
-      if (recoveredUser) {
-        req.user = recoveredUser;
-        return next();
-      }
-    }
+  } catch {
+    // Expired or invalid Firebase tokens must be refreshed or reauthenticated;
+    // their decoded payload is never accepted without cryptographic verification.
     return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
   }
 };
-

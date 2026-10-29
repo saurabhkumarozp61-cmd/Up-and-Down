@@ -35,7 +35,7 @@ export const MarketCard: React.FC<MarketCardProps> = ({
   return (
     <article
       data-testid={`market-card-${market.id}`}
-      className="bg-[#131B2E] border border-[#1E293B] rounded-2xl p-4 transition-colors hover:border-slate-700/80"
+      className="market-card bg-[#131B2E] border border-[#1E293B] rounded-2xl sm:rounded-3xl p-4 sm:p-5 transition-all hover:border-slate-700/80 hover:shadow-lg hover:shadow-black/10"
     >
       {/* Top Unboxed Metadata Row (Zero-Pill Discipline) */}
       <div className="flex items-center justify-between gap-2 text-xs text-slate-400 mb-2">
@@ -72,7 +72,7 @@ export const MarketCard: React.FC<MarketCardProps> = ({
       </div>
 
       {/* Market Question Headline (Clickable to inspect details & live calculator publicly) */}
-      <h3 className="text-[15px] font-semibold leading-snug text-slate-50 mb-3">
+      <h3 className="text-base sm:text-lg font-semibold leading-snug text-slate-50 mb-4 min-h-[2.75rem]">
         <button
           type="button"
           onClick={() =>
@@ -100,7 +100,10 @@ export const MarketCard: React.FC<MarketCardProps> = ({
           <span className="text-[#10B981]">YES {yesPrice}%</span>
           <span className="text-[#F43F5E]">NO {noPrice}%</span>
         </div>
-        <div className="w-full h-2.5 bg-[#090D16] rounded-full overflow-hidden flex p-0.5 gap-0.5 border border-slate-800/80">
+        <div
+          aria-label={`YES ${yesPrice} percent, NO ${noPrice} percent`}
+          className="w-full h-3 bg-[#090D16] rounded-full overflow-hidden flex p-0.5 gap-0.5 border border-slate-800/80"
+        >
           <div
             className="h-full bg-[#10B981] rounded-l-full transition-all duration-200"
             style={{ width: `${yesPrice}%` }}
@@ -118,7 +121,7 @@ export const MarketCard: React.FC<MarketCardProps> = ({
           <button
             type="button"
             onClick={() => onSelectTrade(market, 'YES')}
-            className="min-h-[44px] px-3 py-2.5 rounded-xl bg-[#10B981]/15 hover:bg-[#10B981]/25 active:scale-[0.98] border border-[#10B981]/40 text-[#10B981] font-semibold text-xs flex items-center justify-between transition-all whitespace-nowrap"
+            className="min-h-[48px] px-3 py-2.5 rounded-xl bg-[#10B981]/15 hover:bg-[#10B981]/25 active:scale-[0.98] border border-[#10B981]/40 text-[#10B981] font-semibold text-xs sm:text-sm flex items-center justify-between gap-2 transition-all whitespace-nowrap"
           >
             <span>Buy YES</span>
             <span className="font-mono-tabular text-emerald-200">{yesPrice} Coins</span>
@@ -127,7 +130,7 @@ export const MarketCard: React.FC<MarketCardProps> = ({
           <button
             type="button"
             onClick={() => onSelectTrade(market, 'NO')}
-            className="min-h-[44px] px-3 py-2.5 rounded-xl bg-[#F43F5E]/15 hover:bg-[#F43F5E]/25 active:scale-[0.98] border border-[#F43F5E]/40 text-[#F43F5E] font-semibold text-xs flex items-center justify-between transition-all whitespace-nowrap"
+            className="min-h-[48px] px-3 py-2.5 rounded-xl bg-[#F43F5E]/15 hover:bg-[#F43F5E]/25 active:scale-[0.98] border border-[#F43F5E]/40 text-[#F43F5E] font-semibold text-xs sm:text-sm flex items-center justify-between gap-2 transition-all whitespace-nowrap"
           >
             <span>Buy NO</span>
             <span className="font-mono-tabular text-rose-200">{noPrice} Coins</span>

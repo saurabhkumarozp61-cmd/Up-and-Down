@@ -30,7 +30,6 @@ interface AuthSheetModalProps {
   onLogin: (
     identifier: string,
     password: string,
-    isDemoQuickLogin?: boolean,
     requestCreatorInvite?: boolean
   ) => void;
   onGoogleLogin: (
@@ -89,7 +88,7 @@ export const AuthSheetModal = ({
   const handleLoginSubmit = (e: FormEvent) => {
     e.preventDefault();
     setTelegramNotice(null);
-    onLogin(loginIdentifier, loginPassword, false, hasCreatorInvite);
+    onLogin(loginIdentifier, loginPassword, hasCreatorInvite);
   };
 
   // Strictly verify real Telegram WebApp context — never auto-create a random account outside Telegram!
@@ -114,12 +113,12 @@ export const AuthSheetModal = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm"
+      className="auth-sheet-overlay fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       aria-labelledby="auth-sheet-title"
     >
-      <div className="w-full max-w-[430px] max-h-[92vh] overflow-y-auto bg-[#131B2E] border-t border-x border-[#1E293B] rounded-t-3xl p-5 text-white shadow-2xl">
+      <div className="auth-sheet-panel w-full max-w-[430px] max-h-[92vh] overflow-y-auto bg-[#131B2E] border-t border-x border-[#1E293B] rounded-t-3xl p-5 text-white shadow-2xl">
         {/* Grab Handle */}
         <div className="w-10 h-1.5 bg-slate-700 rounded-full mx-auto mb-3" />
 
@@ -447,4 +446,3 @@ export const AuthSheetModal = ({
     </div>
   );
 };
-

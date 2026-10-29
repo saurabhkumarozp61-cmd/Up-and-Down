@@ -23,6 +23,7 @@ import {
   FlexCardData,
 } from '../types.ts';
 import {
+  calculateEarlyExitSell,
   checkDailyClaimEligibility,
   isOwnerEmail,
   isRealMoneyEligible,
@@ -41,7 +42,7 @@ interface PortfolioViewProps {
   onSellPositionEarly?: (
     positionId: number,
     sharesToSell: number
-  ) => Promise<void>;
+  ) => Promise<{ sharesSold: number; creditedAmount: number; executionPrice: number }>;
 }
 
 export const PortfolioView: React.FC<PortfolioViewProps> = ({
@@ -128,21 +129,33 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     setSellStatusBanner(null);
     const pct = sellPercentByPos[pos.id] ?? 100;
     const sharesHeld = Number(pos.sharesQuantity || pos.shares / 100 || 0);
-    const sharesToSell =
+    const requestedShares =
       pct === 100
         ? sharesHeld
         : Number(((sharesHeld * pct) / 100).toFixed(4));
+    const fallbackYes =
+      pos.side === 'YES' ? pos.currentPrice * 100 : (100 - pos.currentPrice) * 100;
+    const fallbackNo =
+      pos.side === 'NO' ? pos.currentPrice * 100 : (100 - pos.currentPrice) * 100;
+    const quote = calculateEarlyExitSell({
+      yesPool: pos.marketYesPool ?? fallbackYes,
+      noPool: pos.marketNoPool ?? fallbackNo,
+      side: pos.side,
+      sharesHeld,
+      sharesToSell: requestedShares,
+      entryPrice: pos.entryPrice,
+    });
+    const sharesToSell = quote.sharesToSell;
     if (sharesToSell <= 0) return;
 
     setSellingPositionId(pos.id);
     try {
-      await onSellPositionEarly(pos.id, sharesToSell);
-      const estPayout = Number((sharesToSell * pos.currentPrice).toFixed(2));
-      const unitLabel = pos.walletType === 'REAL_INR' ? '₹' : 'Coins ';
+      const result = await onSellPositionEarly(pos.id, sharesToSell);
+      const payout = Number(result.creditedAmount || 0);
+      const executionPrice = Number(result.executionPrice || quote.executionPrice);
+      const unitLabel = pos.walletType === 'REAL_INR' ? '₹' : '';
       setSellStatusBanner(
-        `Early Exit executed! Sold ${sharesToSell} ${pos.side} shares at live price ₹${pos.currentPrice} — Credited ${unitLabel}${estPayout.toLocaleString(
-          'en-IN'
-        )} immediately to your wallet!`
+        `Sale confirmed: ${Number(result.sharesSold || sharesToSell).toFixed(4)} ${pos.side} shares filled at an average ₹${executionPrice.toFixed(2)}. Credited ${unitLabel}${payout.toLocaleString('en-IN')}${pos.walletType === 'REAL_INR' ? '' : ' Coins'}.`
       );
     } catch (err: any) {
       setSellErrorBanner(err.message || 'Early exit sell failed');
@@ -214,7 +227,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             </p>
           </div>
           <div>
-            <p className="text-[11px] text-slate-400">Live Exit Value</p>
+            <p className="text-[11px] text-slate-400">Estimated Exit Value</p>
             <p className="text-sm font-bold font-mono-tabular text-amber-300">
               ₹{Math.round(activePortfolioValue).toLocaleString('en-IN')} (
               {winRate}% W)
@@ -230,7 +243,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           {realMoneyEligible ? (
             <>
               <IndianRupee className="w-4 h-4" />
-              <span>Add Real Money via UPI QR &amp; Open Bet Calculator</span>
+              <span>Open UPI Wallet &amp; Share Calculator</span>
             </>
           ) : (
             <>
@@ -358,13 +371,27 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                 pos.sharesQuantity || pos.shares / 100 || 0
               );
               const selectedSellPct = sellPercentByPos[pos.id] ?? 100;
-              const sharesToSell =
+              const requestedShares =
                 selectedSellPct === 100
                   ? sharesHeld
                   : Number(((sharesHeld * selectedSellPct) / 100).toFixed(4));
-              const liveExitPayout = Number(
-                (sharesToSell * pos.currentPrice).toFixed(2)
-              );
+              const fallbackYes =
+                pos.side === 'YES' ? pos.currentPrice * 100 : (100 - pos.currentPrice) * 100;
+              const fallbackNo =
+                pos.side === 'NO' ? pos.currentPrice * 100 : (100 - pos.currentPrice) * 100;
+              const exitQuote = calculateEarlyExitSell({
+                yesPool: pos.marketYesPool ?? fallbackYes,
+                noPool: pos.marketNoPool ?? fallbackNo,
+                side: pos.side,
+                sharesHeld,
+                sharesToSell: requestedShares,
+                entryPrice: pos.entryPrice,
+              });
+              const sharesToSell = exitQuote.sharesToSell;
+              const liveExitPayout =
+                pos.walletType === 'REAL_INR'
+                  ? exitQuote.payoutAmount
+                  : Math.floor(exitQuote.payoutAmount);
               const costOfSold = Number(
                 (sharesToSell * pos.entryPrice).toFixed(2)
               );
@@ -450,7 +477,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                             : 'text-[#F43F5E]'
                         }`}
                       >
-                        {pos.side} @ ₹{pos.entryPrice}
+                        {pos.side} @ ₹{pos.entryPrice.toFixed(2)}
                       </span>
                     </div>
                     <div>
@@ -460,7 +487,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                       </span>
                     </div>
                     <div>
-                      <span className="text-slate-400 block">Live Price</span>
+                      <span className="text-slate-400 block">Mid Price</span>
                       <span className="font-semibold text-white">
                         ₹{pos.currentPrice}
                       </span>
@@ -488,8 +515,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                           <span className="font-bold text-sky-300 flex items-center gap-1">
                             <TrendingUp className="w-3.5 h-3.5" />
                             <span>
-                              Early Exit (Book Profit / Stop-Loss @ Live ₹
-                              {pos.currentPrice})
+                              Estimated Exit After Pool Impact
                             </span>
                           </span>
                           <span
@@ -537,8 +563,8 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                           <ArrowUpRight className="w-4 h-4" />
                           <span>
                             {sellingPositionId === pos.id
-                              ? 'Selling Position at Live Market Price...'
-                              : `Sell ${sharesToSell} sh Now · Credit ${
+                              ? 'Selling at the quoted market amount...'
+                              : `Sell ${sharesToSell} sh · Est. ${
                                   isRealInr ? '₹' : ''
                                 }${liveExitPayout.toLocaleString('en-IN')}${
                                   isRealInr ? '' : ' Coins'

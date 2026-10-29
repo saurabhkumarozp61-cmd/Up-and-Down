@@ -71,8 +71,10 @@ export interface PositionItem {
   marketCategory: string;
   marketStatus: 'open' | 'resolved' | 'cancelled';
   marketOutcome: 'YES' | 'NO' | null;
+  marketYesPool?: number;
+  marketNoPool?: number;
   currentPrice: number;
-  currentValue: number;    // Live Early-Exit Sell Value = sharesQuantity * currentPrice
+  currentValue: number;    // Estimated executable exit value after pool impact
   unrealizedPnl: number;   // currentValue - investedAmount
   unrealizedPnlPercent: number;
   potentialPayout: number; // Final settlement payout if side wins = sharesQuantity * ₹100

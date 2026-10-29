@@ -44,6 +44,7 @@ import {
   LeaderboardEntryInput,
   OWNER_EMAIL,
   RealMoneyAccessStatus,
+  validateUtrNumber,
 } from '../utils/marketMath.ts';
 
 export interface AccountPredictorEntry extends LeaderboardEntryInput {
@@ -171,6 +172,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
   // Copy states
   const [copiedRef, setCopiedRef] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
+  const [payoutUtrByWithdrawal, setPayoutUtrByWithdrawal] = useState<
+    Record<number, string>
+  >({});
 
   // Preferences state
   const [oddsFormat, setOddsFormat] = useState<'percent' | 'coins'>('percent');
@@ -274,9 +278,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     (p) => p.realMoneyStatus === 'pending'
   );
   const pendingUpiDeposits = adminWalletTransactions.filter(
-    (t) =>
-      t.type === 'DEPOSIT' &&
-      (t.status === 'PENDING' || t.status === 'APPROVED')
+    (t) => t.type === 'DEPOSIT' && t.status === 'PENDING'
   );
   const pendingUpiWithdrawals = adminWalletTransactions.filter(
     (t) => t.type === 'WITHDRAWAL' && t.status === 'PENDING'
@@ -532,6 +534,14 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
     decision: 'APPROVED' | 'REJECTED'
   ) => {
     if (!onReviewDeposit) return;
+    if (
+      decision === 'APPROVED' &&
+      !window.confirm(
+        `Before approving ₹${tx.amountInr.toLocaleString('en-IN')}, verify the incoming payment in the actual bank/UPI statement. A submitted UTR alone is not proof of receipt.`
+      )
+    ) {
+      return;
+    }
     setErrorMessage(null);
     setStatusMessage(null);
     setIsBusy(true);
@@ -539,9 +549,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
       await onReviewDeposit(tx.id, decision);
       setStatusMessage(
         decision === 'APPROVED'
-          ? `Approved ₹${tx.amountInr.toLocaleString('en-IN')} deposit (UTR: ${
+          ? `Verified and credited ₹${tx.amountInr.toLocaleString('en-IN')} deposit (UTR: ${
               tx.utrNumber
-            }) for @${tx.username}! Instant wallet credit completed.`
+            }) for @${tx.username}.`
           : `Rejected deposit request (UTR: ${tx.utrNumber}) from @${tx.username}.`
       );
     } catch (err: any) {
@@ -553,19 +563,43 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
 
   const handleWithdrawalDecision = async (
     tx: WalletTransactionItem,
-    decision: 'COMPLETED' | 'REJECTED'
+    decision: 'COMPLETED' | 'REJECTED',
+    payoutUtrNumber?: string
   ) => {
     if (!onReviewWithdrawal) return;
+    const payoutUtr = validateUtrNumber(String(payoutUtrNumber || ''));
+    if (decision === 'COMPLETED' && !payoutUtr.valid) {
+      setErrorMessage(payoutUtr.error || 'Enter the actual payout UTR first.');
+      return;
+    }
+    if (
+      decision === 'COMPLETED' &&
+      !window.confirm(
+        `Confirm you sent ₹${Math.abs(tx.amountInr).toLocaleString('en-IN')} to ${tx.upiId} and verified payout UTR ${payoutUtr.clean} in your bank/UPI app.`
+      )
+    ) {
+      return;
+    }
     setErrorMessage(null);
     setStatusMessage(null);
     setIsBusy(true);
     try {
-      await onReviewWithdrawal(tx.id, decision);
+      await onReviewWithdrawal(
+        tx.id,
+        decision,
+        decision === 'COMPLETED' ? payoutUtr.clean : undefined
+      );
+      if (decision === 'COMPLETED') {
+        setPayoutUtrByWithdrawal((current) => ({
+          ...current,
+          [tx.id]: '',
+        }));
+      }
       setStatusMessage(
         decision === 'COMPLETED'
-          ? `Marked ₹${tx.amountInr.toLocaleString(
+          ? `Marked ₹${Math.abs(tx.amountInr).toLocaleString(
               'en-IN'
-            )} withdrawal to ${tx.upiId} (@${tx.username}) as COMPLETED!`
+            )} withdrawal to ${tx.upiId} (@${tx.username}) paid; UTR ${payoutUtr.clean} recorded.`
           : `Rejected withdrawal and refunded ₹${tx.amountInr.toLocaleString(
               'en-IN'
             )} to @${tx.username}'s wallet.`
@@ -740,7 +774,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             <div className="flex items-center gap-1.5 flex-wrap">
               <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
                 <IndianRupee className="w-4 h-4 text-emerald-400" />
-                <span>Direct UPI Wallet &amp; ₹100 Share Calculator</span>
+                <span>UPI Wallet &amp; ₹100 Share Calculator</span>
               </h3>
               <span
                 className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
@@ -752,9 +786,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                 }`}
               >
                 {isOwner
-                  ? 'OWNER · ACTIVE'
+                  ? 'OWNER · ACCESS'
                   : realMoneyEligible
-                  ? 'APPROVED · LIVE'
+                  ? 'APPROVED · MANUAL REVIEW'
                   : user.realMoneyStatus === 'pending'
                   ? 'PENDING OWNER APPROVAL'
                   : 'INVITE ONLY'}
@@ -762,7 +796,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             </div>
             <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
               {realMoneyEligible
-                ? 'Scan Owner UPI QR, submit 12-digit UTR for instant verification, and trade ₹100-base shares.'
+                ? 'Deposit requests stay pending until the Owner verifies the incoming payment in the bank/UPI statement. A UTR by itself is not proof of receipt.'
                 : `Real Money UPI Wallet & Trading is enabled for the Owner (${OWNER_EMAIL}) and Invite-Only approved users.`}
             </p>
           </div>
@@ -796,7 +830,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
             <>
               <Calculator className="w-4 h-4" />
               <span>
-                Open Direct UPI QR Wallet, Submit UTR &amp; Calculator
+                Open UPI Wallet, Deposit Review &amp; Calculator
               </span>
             </>
           ) : user.realMoneyStatus === 'pending' ? (
@@ -1305,15 +1339,13 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                   </span>
                 </p>
                 <span className="text-[10px] text-slate-400">
-                  Paid to {ownerUpiId}
+                  Receiving UPI: {ownerUpiId}
                 </span>
               </div>
 
               {pendingUpiDeposits.length === 0 ? (
                 <p className="text-xs text-slate-400">
-                  No UPI deposits recorded yet. When any user adds funds to your
-                  Main UPI ID ({ownerUpiId}), the amount is credited to their
-                  wallet and appears here.
+                  No pending UPI deposit claims. New claims remain uncredited until you match the amount, sender, and UTR to an incoming payment in your bank/UPI statement.
                 </p>
               ) : (
                 <div className="space-y-2 max-h-56 overflow-y-auto">
@@ -1327,10 +1359,10 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                         <p className="font-bold text-white truncate">
                           @{dep.username} ·{' '}
                           <span className="text-emerald-400 font-mono-tabular">
-                            +₹{dep.amountInr.toLocaleString('en-IN')}
+                            Claim ₹{dep.amountInr.toLocaleString('en-IN')}
                           </span>{' '}
                           <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-bold">
-                            {dep.status}
+                            {dep.status} · NOT CREDITED
                           </span>
                         </p>
                         <p className="text-[11px] font-mono text-amber-300">
@@ -1338,6 +1370,9 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                         </p>
                         <p className="text-[10px] text-slate-400 truncate">
                           To Owner UPI: {dep.upiId || ownerUpiId}
+                        </p>
+                        <p className="text-[10px] text-slate-400 truncate">
+                          {dep.notes}
                         </p>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
@@ -1351,18 +1386,20 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                             }
                             className="min-h-[34px] px-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-[11px]"
                           >
-                            Approve
+                            Verify &amp; approve
                           </button>
                         )}
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          data-testid={`reject-deposit-btn-${dep.id}`}
-                          onClick={() => handleDepositDecision(dep, 'REJECTED')}
-                          className="min-h-[34px] px-2.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 font-bold text-[11px]"
-                        >
-                          {dep.status === 'APPROVED' ? 'Reverse' : 'Reject'}
-                        </button>
+                        {dep.status === 'PENDING' && (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            data-testid={`reject-deposit-btn-${dep.id}`}
+                            onClick={() => handleDepositDecision(dep, 'REJECTED')}
+                            className="min-h-[34px] px-2.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 font-bold text-[11px]"
+                          >
+                            Reject
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -1395,7 +1432,7 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                     <div
                       key={wtx.id}
                       data-testid={`admin-pending-withdrawal-row-${wtx.id}`}
-                      className="p-2.5 rounded-xl bg-[#131B2E] border border-sky-500/30 flex items-center justify-between gap-2 text-xs"
+                      className="p-2.5 rounded-xl bg-[#131B2E] border border-sky-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
                     >
                       <div className="min-w-0">
                         <p className="font-bold text-white truncate">
@@ -1407,18 +1444,42 @@ export const AdminStudioView: React.FC<AdminStudioViewProps> = ({
                         <p className="text-[11px] font-mono text-emerald-300 truncate">
                           Send to UPI: {wtx.upiId}
                         </p>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={12}
+                          aria-label={`Actual payout UTR for withdrawal ${wtx.id}`}
+                          placeholder="Enter actual 12-digit payout UTR"
+                          value={payoutUtrByWithdrawal[wtx.id] || ''}
+                          onChange={(e) =>
+                            setPayoutUtrByWithdrawal((current) => ({
+                              ...current,
+                              [wtx.id]: e.target.value.replace(/\D/g, '').slice(0, 12),
+                            }))
+                          }
+                          className="w-full mt-2 min-h-[36px] px-2.5 rounded-lg bg-[#090D16] border border-[#1E293B] text-[11px] font-mono text-white"
+                        />
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
-                          disabled={isBusy}
+                          disabled={
+                            isBusy ||
+                            !validateUtrNumber(
+                              payoutUtrByWithdrawal[wtx.id] || ''
+                            ).valid
+                          }
                           data-testid={`complete-withdrawal-btn-${wtx.id}`}
                           onClick={() =>
-                            handleWithdrawalDecision(wtx, 'COMPLETED')
+                            handleWithdrawalDecision(
+                              wtx,
+                              'COMPLETED',
+                              payoutUtrByWithdrawal[wtx.id]
+                            )
                           }
                           className="min-h-[34px] px-2.5 rounded-lg bg-sky-400 hover:bg-sky-300 text-slate-950 font-extrabold text-[11px]"
                         >
-                          Mark Completed
+                          Confirm Paid
                         </button>
                         <button
                           type="button"
