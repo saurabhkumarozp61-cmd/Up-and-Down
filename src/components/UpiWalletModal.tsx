@@ -14,7 +14,6 @@ import {
   TrendingUp,
   Copy,
   Check,
-  QrCode,
   ShieldCheck,
 } from 'lucide-react';
 import {
@@ -24,7 +23,6 @@ import {
   WalletTransactionItem,
 } from '../types.ts';
 import {
-  buildUpiPaymentUri,
   calculateEarlyExitSell,
   calculateMarketPrices,
   calculateRealMoneyBet,
@@ -35,6 +33,7 @@ import {
   isRealMoneyEligible,
   OWNER_EMAIL,
   TradeSide,
+  validateUpiId,
   validateUtrNumber,
 } from '../utils/marketMath.ts';
 
@@ -108,12 +107,10 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
     'deposit' | 'calculator' | 'withdraw' | 'ledger'
   >('deposit');
 
-  // Direct Manual UPI Deposit State (Static UPI ID + QR + 12-Digit UTR)
+  // Manual UPI deposit claim details. Nothing is credited until owner review.
   const [depositAmount, setDepositAmount] = useState<number>(500);
   const [utrNumberInput, setUtrNumberInput] = useState<string>('');
-  const [upiIdInput, setUpiIdInput] = useState<string>(
-    user?.upiId || (isOwner ? '9931802215@fam' : '')
-  );
+  const [upiIdInput, setUpiIdInput] = useState<string>(user?.upiId || '');
   const [selectedApp, setSelectedApp] = useState<string>(UPI_APPS[0]);
   const [copiedOwnerUpi, setCopiedOwnerUpi] = useState<boolean>(false);
 
@@ -147,8 +144,6 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
     if (user?.upiId) {
       setUpiIdInput(user.upiId);
       setInviteUpiId(user.upiId);
-    } else if (isOwner && !upiIdInput) {
-      setUpiIdInput('saurabh@okaxis');
     }
     if (user?.username && !fullName) {
       setFullName(user.username);
@@ -194,12 +189,7 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
   });
 
   const depositSummary = calculateUpiDepositSummary(depositAmount);
-  const upiUri = buildUpiPaymentUri({
-    upiId: ownerUpiId,
-    payeeName: ownerUpiName,
-    amountInr: depositAmount,
-    note: `UpDown Wallet Deposit @${user?.username || 'member'}`,
-  });
+  const senderUpiCheck = validateUpiId(upiIdInput);
 
   const pendingDeposits = walletTransactions.filter(
     (t) => t.type === 'DEPOSIT' && t.status === 'PENDING'
@@ -223,16 +213,13 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
     setErrorBanner(null);
     setStatusBanner(null);
 
-    const rawUtr = utrNumberInput.replace(/\s+/g, '').trim();
-    const effectiveUtr = rawUtr
-      ? rawUtr
-      : `${Date.now().toString().slice(-8)}${Math.floor(
-          1000 + Math.random() * 9000
-        )}`;
-
-    const utrCheck = validateUtrNumber(effectiveUtr);
+    const utrCheck = validateUtrNumber(utrNumberInput.replace(/\s+/g, '').trim());
     if (!utrCheck.valid) {
-      setErrorBanner(utrCheck.error || 'Enter a valid 12-digit numeric UTR.');
+      setErrorBanner(utrCheck.error || 'Enter the actual 12-digit UTR from a completed transfer.');
+      return;
+    }
+    if (!senderUpiCheck.valid) {
+      setErrorBanner(senderUpiCheck.error || 'Enter the sender UPI ID used for the transfer.');
       return;
     }
 
@@ -241,18 +228,12 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
       const res = await onDepositUpi(
         depositAmount,
         utrCheck.clean,
-        upiIdInput || ownerUpiId,
+        senderUpiCheck.clean,
         selectedApp
       );
       setUtrNumberInput('');
-      const credited = Number(res.addedInr || depositAmount);
       setStatusBanner(
-        res.message ||
-          `+₹${credited.toLocaleString(
-            'en-IN'
-          )} credited to your Live Wallet! Paid to Owner UPI (${ownerUpiId}) · UTR: ${
-            res.utrNumber
-          }. You can now buy & sell YES/NO shares immediately!`
+        `Deposit claim for ₹${Number(res.requestedInr || depositAmount).toLocaleString('en-IN')} submitted for manual review. No funds were credited. UTR: ${res.utrNumber}.`
       );
     } catch (err: any) {
       setErrorBanner(err.message || 'UPI deposit request failed');
@@ -324,7 +305,7 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                   id="upi-wallet-modal-title"
                   className="text-base font-extrabold tracking-tight text-white"
                 >
-                  Direct UPI Wallet &amp; ₹100 Trading
+                  UPI Wallet &amp; ₹100 Share Calculator
                 </h2>
                 <span
                   data-testid="upi-access-badge"
@@ -337,16 +318,16 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                   }`}
                 >
                   {isOwner
-                    ? 'OWNER · LIVE'
+                    ? 'OWNER · ACCESS'
                     : eligible
-                    ? 'APPROVED · LIVE'
+                    ? 'APPROVED · MANUAL REVIEW'
                     : user?.realMoneyStatus === 'pending'
                     ? 'PENDING APPROVAL'
                     : 'INVITE ONLY'}
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Owner UPI QR · 12-Digit UTR Verification · ₹100 Share Base
+                Manual deposit request · Owner verification · ₹100 share base
               </p>
             </div>
           </div>
@@ -388,9 +369,8 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
               Sign In to Access UPI Real Money Wallet
             </h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Real Money UPI Wallet &amp; Trading is enabled by default for the
-              Owner (<strong className="text-white">{OWNER_EMAIL}</strong>) and
-              available via Invite-Only approval for campus members.
+              Real-money access is invite-only for the Owner (
+              <strong className="text-white">{OWNER_EMAIL}</strong>) and approved members. Deposit claims remain pending until the Owner verifies the actual incoming payment.
             </p>
             <button
               type="button"
@@ -409,7 +389,7 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
             <div className="p-4 rounded-2xl bg-[#090D16] border border-[#1E293B] flex items-center justify-between gap-3">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  Live Approved UPI Balance
+                  Available Verified Wallet Balance
                 </p>
                 <p
                   data-testid="upi-wallet-balance-value"
@@ -423,16 +403,15 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                 <p className="text-[11px] text-slate-400 mt-0.5">
                   {pendingDeposits.length > 0 ? (
                     <span className="text-amber-300 font-semibold">
-                      {pendingDeposits.length} Deposit(s) Pending Owner UTR
-                      Approval
+                      {pendingDeposits.length} deposit claim(s) pending review; not credited
                     </span>
                   ) : user.upiId ? (
                     <>
-                      Linked UPI:{' '}
+                      Saved sender UPI:{' '}
                       <strong className="text-white">{user.upiId}</strong>
                     </>
                   ) : (
-                    '12-Digit UTR Verified · ₹0 Fake Auto-Credit'
+                    'No saved sender UPI ID. Enter the ID used for your transfer.'
                   )}
                 </p>
               </div>
@@ -510,7 +489,7 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
               </button>
             </div>
 
-            {/* TAB 1: DIRECT MANUAL UPI QR + STATIC UPI ID + 12-DIGIT UTR SUBMISSION */}
+            {/* TAB 1: MANUAL UPI DEPOSIT CLAIM */}
             {activeTab === 'deposit' && (
               <>
                 {eligible ? (
@@ -571,125 +550,85 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                       </div>
                     </div>
 
-                    {/* Step 2: Scan Owner's Static UPI QR Code or Copy UPI ID */}
+                    {/* Step 2: Recipient details; this screen never launches a payment app. */}
                     <div
                       data-testid="owner-static-upi-card"
-                      className="p-3.5 rounded-2xl bg-[#090D16] border border-emerald-500/35 space-y-3"
+                      className="p-3.5 rounded-2xl bg-[#090D16] border border-amber-500/35 space-y-3"
                     >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                          <QrCode className="w-4 h-4 text-emerald-400" />
-                          <span>
-                            Step 2: Scan QR or Pay Owner UPI ID (₹
-                            {depositAmount.toLocaleString('en-IN')})
+                      <div className="flex items-center gap-2 text-xs font-bold text-white">
+                        <IndianRupee className="w-4 h-4 text-amber-300" />
+                        <span>Step 2: Optional manual transfer to the recipient below</span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-amber-100/90">
+                        This is not an in-app payment. If you choose to transfer, verify the payee name and UPI ID in your UPI app before sending. Cue does not open a payment app or generate a QR code.
+                      </p>
+                      <div className="p-3 rounded-xl bg-[#131B2E] border border-[#1E293B]">
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Recipient UPI ID</p>
+                        <div className="flex items-center justify-between gap-2 mt-1">
+                          <span
+                            data-testid="owner-upi-id-text"
+                            className="text-sm font-mono font-bold text-white truncate"
+                          >
+                            {ownerUpiId}
                           </span>
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-[10px] font-bold text-emerald-300">
-                          NPCI UPI 2.0
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-3 p-3 rounded-xl bg-[#131B2E] border border-[#1E293B]">
-                        {/* Deterministic Scannable-Style UPI QR Graphic */}
-                        <div
-                          className="w-20 h-20 rounded-xl bg-white p-1.5 shrink-0 flex flex-col items-center justify-center border border-emerald-400"
-                          title={upiUri}
-                        >
-                          <svg
-                            viewBox="0 0 36 36"
-                            className="w-full h-full text-slate-950"
-                            fill="currentColor"
-                            aria-label="Owner UPI QR Code"
-                          >
-                            <path d="M2 2h10v10H2V2zm2 2v6h6V4H4zm2 2h2v2H6V6zm18-4h10v10H24V2zm2 2v6h6V4h-6zm2 2h2v2h-2V6zM2 24h10v10H2V24zm2 2v6h6v-6H4zm2 2h2v2H6v-2zm10-24h2v4h-2V4zm4 2h2v4h-2V6zm-4 6h4v2h-4v-2zm-2 4h6v2h-6v-2zm8-2h2v6h-2v-6zm4 4h6v2h-6v-2zm-10 4h4v4h-4v-4zm6 2h4v6h-4v-6zm6 2h4v4h-4v-4zm-12 4h4v4h-4v-4zm10 2h6v2h-6v-2z" />
-                          </svg>
-                        </div>
-
-                        <div className="min-w-0 flex-1 space-y-1.5">
-                          <p className="text-[11px] text-slate-400">
-                            Merchant / Owner UPI ID:
-                          </p>
-                          <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-[#090D16] border border-[#1E293B]">
-                            <span
-                              data-testid="owner-upi-id-text"
-                              className="text-xs font-mono font-bold text-emerald-400 truncate"
-                            >
-                              {ownerUpiId}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={handleCopyOwnerUpi}
-                              className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold flex items-center gap-1 shrink-0"
-                            >
-                              {copiedOwnerUpi ? (
-                                <>
-                                  <Check className="w-3 h-3" />
-                                  <span>Copied</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Copy className="w-3 h-3" />
-                                  <span>Copy ID</span>
-                                </>
-                              )}
-                            </button>
-                          </div>
-                          <p className="text-[10px] text-slate-400 truncate">
-                            Payee: <strong className="text-slate-200">{ownerUpiName}</strong>
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* UPI App Selector */}
-                      <div className="grid grid-cols-2 gap-2">
-                        {UPI_APPS.map((app) => (
                           <button
-                            key={app}
                             type="button"
-                            onClick={() => setSelectedApp(app)}
-                            className={`min-h-[34px] px-2.5 rounded-xl text-[11px] font-semibold border text-left truncate transition-all ${
-                              selectedApp === app
-                                ? 'bg-indigo-500/20 border-indigo-400 text-white'
-                                : 'bg-[#131B2E] border-[#1E293B] text-slate-400'
-                            }`}
+                            onClick={handleCopyOwnerUpi}
+                            className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 text-[10px] font-bold flex items-center gap-1 shrink-0"
                           >
-                            {app}
+                            {copiedOwnerUpi ? (
+                              <><Check className="w-3 h-3" /><span>Copied</span></>
+                            ) : (
+                              <><Copy className="w-3 h-3" /><span>Copy ID</span></>
+                            )}
                           </button>
-                        ))}
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          Payee name to confirm: <strong className="text-slate-200">{ownerUpiName}</strong>
+                        </p>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                          Requested amount: <strong className="text-white">₹{depositAmount.toLocaleString('en-IN')}</strong>
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold text-slate-300 mb-1.5">UPI app used (for the review note only)</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {UPI_APPS.map((app) => (
+                            <button
+                              key={app}
+                              type="button"
+                              onClick={() => setSelectedApp(app)}
+                              className={`min-h-[34px] px-2.5 rounded-xl text-[11px] font-semibold border text-left truncate transition-all ${
+                                selectedApp === app
+                                  ? 'bg-indigo-500/20 border-indigo-400 text-white'
+                                  : 'bg-[#131B2E] border-[#1E293B] text-slate-400'
+                              }`}
+                            >
+                              {app}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
-                    {/* Step 3: Enter 12-Digit UTR / Transaction ID & Sender UPI ID */}
+                    {/* Step 3: Enter a genuine transaction reference and sender ID. */}
                     <div className="p-3.5 rounded-2xl bg-[#090D16] border border-[#1E293B] space-y-3">
                       <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label
-                            htmlFor="upi-utr-input"
-                            className="block text-xs font-bold text-white"
-                          >
-                            Step 3: 12-Digit UPI UTR / Reference No.
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setUtrNumberInput(
-                                `${Date.now().toString().slice(-8)}${Math.floor(
-                                  1000 + Math.random() * 9000
-                                )}`
-                              )
-                            }
-                            className="text-[10px] font-bold text-emerald-400 hover:underline"
-                          >
-                            Auto-Fill 12-Digit Ref
-                          </button>
-                        </div>
+                        <label
+                          htmlFor="upi-utr-input"
+                          className="block text-xs font-bold text-white mb-1"
+                        >
+                          Step 3: Actual 12-digit UTR from your completed transfer
+                        </label>
                         <input
                           id="upi-utr-input"
                           data-testid="upi-utr-input"
                           type="text"
                           inputMode="numeric"
+                          autoComplete="off"
                           maxLength={12}
-                          placeholder="e.g. 412839405812 (or leave blank to auto-generate)"
+                          required
+                          placeholder="Enter the UTR shown by your bank/UPI app"
                           value={utrNumberInput}
                           onChange={(e) =>
                             setUtrNumberInput(
@@ -698,17 +637,8 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                           }
                           className="w-full min-h-[42px] px-3.5 rounded-xl bg-[#131B2E] border border-[#1E293B] text-sm font-mono font-bold text-white focus:outline-none focus:border-emerald-400"
                         />
-                        <p className="text-[11px] text-slate-400 mt-1">
-                          Payment routes directly to Owner Main UPI ID (
-                          <strong className="text-emerald-400">
-                            {ownerUpiId}
-                          </strong>
-                          ) and credits{' '}
-                          <strong className="text-emerald-300">
-                            +₹{depositAmount.toLocaleString('en-IN')}
-                          </strong>{' '}
-                          to your live wallet so you can trade YES/NO shares
-                          immediately!
+                        <p className="text-[11px] text-amber-200 mt-1 leading-relaxed">
+                          Only submit after your bank shows the transfer as completed. A UTR is a claim, not proof of payment; your balance stays unchanged until the Owner verifies the incoming transfer.
                         </p>
                       </div>
 
@@ -717,12 +647,14 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                           htmlFor="upi-vpa-input"
                           className="block text-xs font-bold text-white mb-1"
                         >
-                          Your Sender UPI ID (for payouts &amp; records)
+                          Sender UPI ID used for this transfer
                         </label>
                         <input
                           id="upi-vpa-input"
                           type="text"
-                          placeholder="yourname@okaxis or 9931802215@fam"
+                          required
+                          autoComplete="off"
+                          placeholder="yourname@bank"
                           value={upiIdInput}
                           onChange={(e) => setUpiIdInput(e.target.value)}
                           className="w-full min-h-[40px] px-3.5 rounded-xl bg-[#131B2E] border border-[#1E293B] text-xs text-white font-semibold focus:outline-none focus:border-emerald-400"
@@ -732,17 +664,15 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
 
                     <button
                       type="submit"
-                      disabled={isSubmitting || !depositSummary.valid}
+                      disabled={isSubmitting || !depositSummary.valid || !validateUtrNumber(utrNumberInput).valid || !senderUpiCheck.valid}
                       data-testid="upi-deposit-submit-btn"
                       className="w-full min-h-[48px] rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-sm flex items-center justify-center gap-2 shadow-lg transition-all disabled:opacity-50"
                     >
                       <ShieldCheck className="w-4 h-4" />
                       <span>
                         {isSubmitting
-                          ? 'Crediting Wallet via Owner UPI...'
-                          : `Add ₹${depositAmount.toLocaleString(
-                              'en-IN'
-                            )} to Live Wallet (Paid to ${ownerUpiId})`}
+                          ? 'Submitting deposit claim...'
+                          : `Submit ₹${depositAmount.toLocaleString('en-IN')} for manual review`}
                       </span>
                     </button>
 
@@ -771,11 +701,11 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                                 </span>
                               </p>
                               <p className="text-[10px] text-slate-400">
-                                Waiting for Owner verification
+                                Not credited · awaiting Owner verification
                               </p>
                             </div>
                             <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[10px]">
-                              PENDING
+                              PENDING · NOT CREDITED
                             </span>
                           </div>
                         ))}
@@ -977,7 +907,7 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                       htmlFor="calc-market-select"
                       className="block text-[11px] font-medium text-slate-400 mb-1"
                     >
-                      Select Live Event
+                      Select Open Event
                     </label>
                     <select
                       id="calc-market-select"
@@ -1117,9 +1047,9 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
 
                   <div className="grid grid-cols-3 gap-2 pt-2 border-t border-emerald-500/20 text-[11px]">
                     <div>
-                      <p className="text-slate-400">Entry Price</p>
+                      <p className="text-[11px] text-slate-400">Avg Fill Price</p>
                       <p className="font-mono-tabular font-bold text-white">
-                        ₹{betCalc.sharePriceInr}
+                        ₹{betCalc.sharePriceInr.toFixed(2)}
                       </p>
                     </div>
                     <div>
@@ -1137,14 +1067,14 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                   </div>
                 </div>
 
-                {/* Early Exit (Profit Booking / Stop-Loss) Live Simulator */}
+                {/* Hypothetical early-exit quote simulator */}
                 <div className="p-3 rounded-2xl bg-[#131B2E] border border-[#1E293B] space-y-2 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-sky-300">
                       Early Exit Simulator (Sell Before Final Result)
                     </span>
                     <span className="font-mono-tabular font-bold text-white">
-                      Live {calcSide} Price: ₹
+                      Scenario {calcSide} Mid: ₹
                       {calcSide === 'YES'
                         ? simExitLivePrice
                         : 100 - simExitLivePrice}
@@ -1160,10 +1090,13 @@ export const UpiWalletModal: React.FC<UpiWalletModalProps> = ({
                     }
                     className="w-full accent-sky-400"
                   />
+                  <p className="text-[10px] text-slate-400">
+                    Illustration only: actual exit quotes depend on current pool reserves and the size of the sale.
+                  </p>
                   <div className="flex items-center justify-between pt-1 text-[11px]">
                     <span className="text-slate-300">
-                      Early Exit Payout ({betCalc.contracts} sh × ₹
-                      {earlyExitSim.currentLivePrice}):
+                      Estimated exit after pool impact ({betCalc.contracts} sh · avg ₹
+                      {earlyExitSim.executionPrice.toFixed(2)}/sh):
                     </span>
                     <span
                       className={`font-mono-tabular font-extrabold ${

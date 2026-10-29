@@ -9,6 +9,8 @@ import {
   Lock,
   Calculator,
   PlusCircle,
+  Clock,
+  Info,
 } from 'lucide-react';
 import { MarketItem, UserProfile } from '../types.ts';
 import {
@@ -67,6 +69,15 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
 
   if (!market) return null;
 
+  const closeDate = new Date(market.closesAt);
+  const closeDateLabel = Number.isNaN(closeDate.getTime())
+    ? 'Closing date not set'
+    : closeDate.toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+      });
+
   const isRealMoneyMode = walletType === 'REAL_INR';
   const eligibleForRealMoney = isRealMoneyEligible(user);
 
@@ -113,33 +124,34 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
       onOpenUpiWallet();
       return;
     }
-    if (amount <= 0) return;
+    if (
+      !Number.isFinite(amount) ||
+      amount < 10 ||
+      (!isRealMoneyMode && !Number.isInteger(amount))
+    ) return;
     onConfirmTrade(market.id, side, amount, walletType);
   };
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm sm:p-5"
       role="dialog"
       aria-modal="true"
       aria-labelledby="trade-sheet-title"
     >
-      <div className="w-full max-w-[430px] max-h-[92vh] overflow-y-auto bg-[#131B2E] border-t border-x border-[#1E293B] rounded-t-3xl p-5 text-white shadow-2xl animate-in slide-in-from-bottom duration-200">
+      <div className="w-full max-w-[430px] sm:max-w-2xl max-h-[92vh] sm:max-h-[min(88vh,900px)] overflow-y-auto bg-[#131B2E] border-t border-x sm:border border-[#1E293B] rounded-t-3xl sm:rounded-3xl p-5 sm:p-7 text-white shadow-2xl animate-in slide-in-from-bottom duration-200">
         {/* Grab Handle */}
         <div className="w-10 h-1.5 bg-slate-700 rounded-full mx-auto mb-3.5" />
 
         {/* Header */}
-        <div className="flex items-start justify-between gap-3 mb-3.5">
-          <div>
-            <p className="text-xs text-slate-400 mb-1">
-              {market.category} ·{' '}
-              <span className="text-emerald-400 font-semibold">
-                YES ₹{yesPrice} + NO ₹{noPrice} = ₹100 Base
-              </span>
+        <div className="flex items-start justify-between gap-3 mb-4 sm:mb-5">
+          <div className="min-w-0">
+            <p className="text-xs sm:text-sm text-slate-400 mb-1.5">
+              {market.category}
             </p>
             <h2
               id="trade-sheet-title"
-              className="text-base font-bold leading-snug text-white"
+              className="text-xl sm:text-2xl font-bold leading-snug text-white"
             >
               {market.title}
             </h2>
@@ -153,6 +165,80 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        <section
+          aria-label="Current market odds"
+          className="mb-3.5 rounded-2xl bg-[#090D16] border border-[#1E293B] p-4 sm:p-5"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-400">
+                Current odds
+              </p>
+              <p className="text-xs text-slate-500 mt-1">
+                Prices move with the market
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="font-mono-tabular text-lg font-bold text-white">
+                ₹100
+              </p>
+              <p className="text-[11px] text-slate-500">per winning share</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5 mt-4">
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2.5">
+              <p className="text-[11px] font-bold uppercase tracking-wide text-emerald-300">
+                YES
+              </p>
+              <p className="font-mono-tabular text-xl font-bold text-emerald-300">
+                {yesPrice}%
+              </p>
+            </div>
+            <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-right">
+              <p className="text-[11px] font-bold uppercase tracking-wide text-rose-300">
+                NO
+              </p>
+              <p className="font-mono-tabular text-xl font-bold text-rose-300">
+                {noPrice}%
+              </p>
+            </div>
+          </div>
+
+          <div
+            aria-label={`YES ${yesPrice} percent, NO ${noPrice} percent`}
+            className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-rose-500 flex"
+          >
+            <div
+              className="h-full bg-emerald-500 transition-all duration-200"
+              style={{ width: `${yesPrice}%` }}
+            />
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-400">
+            <span className="inline-flex items-center gap-1.5">
+              <Clock className="h-3.5 w-3.5 text-slate-500" />
+              Closes {closeDateLabel}
+            </span>
+            <span>YES + NO = 100%</span>
+          </div>
+        </section>
+
+        <details className="mb-3.5 rounded-2xl border border-[#1E293B] bg-[#090D16]/60 px-4">
+          <summary className="min-h-12 cursor-pointer list-none flex items-center justify-between gap-3 text-xs font-semibold text-slate-200 [&::-webkit-details-marker]:hidden">
+            <span className="inline-flex items-center gap-2">
+              <Info className="h-4 w-4 text-sky-400" />
+              Resolution rules
+            </span>
+            <span className="text-[11px] font-medium text-slate-500">
+              by @{market.creatorUsername}
+            </span>
+          </summary>
+          <p className="border-t border-slate-800/80 py-3 text-xs leading-relaxed text-slate-300">
+            {market.resolutionRules}
+          </p>
+        </details>
 
         {/* WALLET MODE SWITCHER: VIRTUAL COINS VS REAL MONEY (₹ UPI) */}
         <div className="grid grid-cols-2 gap-2 p-1 bg-[#090D16] rounded-2xl border border-[#1E293B] mb-3.5">
@@ -294,6 +380,7 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
                 id="trade-amount-input"
                 type="number"
                 min={10}
+                step={isRealMoneyMode ? 0.01 : 1}
                 max={user ? Math.max(10, activeAvailableBalance || 10000) : 10000}
                 value={amount}
                 onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))}
@@ -329,7 +416,7 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
             </div>
           </div>
 
-          {/* Live Payout & Fractional Shares Box */}
+          {/* AMM Trade Preview & Fractional Shares Box */}
           <div
             data-testid="trade-live-preview"
             className={`rounded-2xl p-3.5 border ${
@@ -370,9 +457,9 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
 
             <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 text-xs">
               <div>
-                <p className="text-slate-400">Entry Price</p>
+                <p className="text-slate-400">Avg Fill Price</p>
                 <p className="font-mono-tabular font-semibold text-white">
-                  ₹{preview.executionPrice} / sh
+                  ₹{preview.executionPrice.toFixed(2)} / sh
                 </p>
               </div>
               <div>
@@ -404,6 +491,9 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
             type="submit"
             disabled={
               isSubmitting ||
+              !Number.isFinite(amount) ||
+              amount < 10 ||
+              (!isRealMoneyMode && !Number.isInteger(amount)) ||
               (user !== null &&
                 (!isRealMoneyMode || eligibleForRealMoney) &&
                 amount > activeAvailableBalance)
@@ -447,7 +537,7 @@ export const TradeSheetModal: React.FC<TradeSheetModalProps> = ({
           <p className="text-[11px] text-center text-slate-400 flex items-center justify-center gap-1">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
             <span>
-              1 Winning Share = ₹100 · Sell Early Anytime at Live Market Price
+              1 Winning Share settles at ₹100. Estimated fills reflect pool impact; early-sale amounts can change with the market.
             </span>
           </p>
         </form>

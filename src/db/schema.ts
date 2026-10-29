@@ -7,6 +7,7 @@ import {
   serial,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 export const profiles = pgTable('profiles', {
@@ -46,8 +47,8 @@ export const markets = pgTable('markets', {
     .default('Resolved based on official public announcement or verified campus notice.'),
   status: text('status').notNull().default('open'), // 'open' | 'resolved' | 'cancelled'
   outcome: text('outcome'), // 'YES' | 'NO' | null
-  yesPool: integer('yes_pool').notNull().default(5000),
-  noPool: integer('no_pool').notNull().default(5000),
+  yesPool: doublePrecision('yes_pool').notNull().default(5000),
+  noPool: doublePrecision('no_pool').notNull().default(5000),
   totalVolume: integer('total_volume').notNull().default(0),
   closesAt: timestamp('closes_at').notNull(),
   createdBy: integer('created_by').references(() => profiles.id),
@@ -69,7 +70,7 @@ export const positions = pgTable('positions', {
   sharesQuantity: doublePrecision('shares_quantity').notNull().default(0), // Exact fractional shares (Investment / Price)
   investedCoins: integer('invested_coins').notNull(),
   investedAmount: doublePrecision('invested_amount').notNull().default(0),
-  entryPrice: integer('entry_price').notNull(),
+  entryPrice: doublePrecision('entry_price').notNull(),
   exitPrice: doublePrecision('exit_price'),
   realizedPnl: doublePrecision('realized_pnl').notNull().default(0),
   exitedEarly: boolean('exited_early').notNull().default(false),
@@ -115,7 +116,17 @@ export const walletTransactions = pgTable('wallet_transactions', {
   reviewedBy: text('reviewed_by'),
   reviewedAt: timestamp('reviewed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (table) => ({
+  gatewayOrderIdUnique: uniqueIndex(
+    'wallet_transactions_gateway_order_id_unique'
+  ).on(table.gatewayOrderId),
+  utrNumberUnique: uniqueIndex('wallet_transactions_utr_number_unique').on(
+    table.utrNumber
+  ),
+  gatewayPaymentIdUnique: uniqueIndex(
+    'wallet_transactions_gateway_payment_id_unique'
+  ).on(table.gatewayPaymentId),
+}));
 
 export const transactions = pgTable('transactions', {
   id: serial('id').primaryKey(),

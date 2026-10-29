@@ -44,14 +44,51 @@ import {
   DEFAULT_OWNER_UPI_NAME,
   isOwnerEmail,
 } from './src/utils/marketMath.ts';
+import { buildPredictorPayload } from './src/utils/predictorPrivacy.ts';
 
 dotenv.config();
+
+function isProductionAuthEnvironment() {
+  return (
+    process.env.NODE_ENV === 'production' ||
+    process.env.npm_lifecycle_event === 'start' ||
+    process.cwd().startsWith('/srv')
+  );
+}
 
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json());
+  app.use(
+    express.json({
+      verify: (req, _res, buffer) => {
+        (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(
+          buffer
+        );
+      },
+    })
+  );
+
+  // Predictor lists are public-facing by default. Only a verified owner session
+  // may also receive the full directory needed by the admin workflow.
+  app.use((req, res, next) => {
+    const sendJson = res.json.bind(res);
+    res.json = ((body?: any) => {
+      if (body && Array.isArray(body.predictors)) {
+        const email = (req as AuthRequest).user?.email;
+        const ownerSession = Boolean(email && isOwnerEmail(email));
+        const publicBody = { ...body };
+        delete publicBody.adminPredictors;
+        body = {
+          ...publicBody,
+          ...buildPredictorPayload(body.predictors, ownerSession),
+        };
+      }
+      return sendJson(body);
+    }) as typeof res.json;
+    next();
+  });
 
   // Healthcheck endpoint
   app.get('/api/health', (_req, res) => {
@@ -72,22 +109,19 @@ async function startServer() {
   // 2. Public: Get Leaderboard data, Owner Main UPI config, & In-App Invite Codes
   app.get('/api/leaderboard', async (_req, res) => {
     try {
-      const [predictors, adminWalletTransactions, ownerUpiCfg] =
-        await Promise.all([
-          getAllProfilesWithPositions(),
-          getAllWalletTransactionsForAdmin(),
-          getOwnerMainUpiConfig(),
-        ]);
+      const [predictors, ownerUpiCfg] = await Promise.all([
+        getAllProfilesWithPositions(),
+        getOwnerMainUpiConfig(),
+      ]);
       res.json({
-        predictors,
-        adminWalletTransactions,
+        ...buildPredictorPayload(predictors),
         inAppInviteCodes: getInAppInviteCodes(),
         upiConfig: {
           ownerUpiId: ownerUpiCfg.ownerUpiId || DEFAULT_OWNER_UPI_ID,
           ownerUpiName: ownerUpiCfg.ownerUpiName || DEFAULT_OWNER_UPI_NAME,
-          gatewayEnabled: Boolean(
-            process.env.PAYMENT_KEY_ID && process.env.PAYMENT_KEY_SECRET
-          ),
+          gatewayEnabled:
+            process.env.PAYMENT_GATEWAY_ENABLED === 'true' &&
+            Boolean(process.env.PAYMENT_KEY_ID && process.env.PAYMENT_KEY_SECRET),
           paymentKeyId: process.env.PAYMENT_KEY_ID || '',
         },
       });
@@ -128,22 +162,15 @@ async function startServer() {
       }
 
       const existing = await getUserProfileByEmailOrUsername(email);
-      const isPreapprovedEmail =
-        existing &&
-        (existing.uid === 'owner-saurabh' ||
-          existing.uid.startsWith('preapproved-'));
-      if (existing && !isPreapprovedEmail) {
+      if (existing) {
         return res.status(400).json({
-          error: 'An account with this email already exists. Please log in instead.',
+          error:
+            'An account with this email already exists. Sign in with its password or verified Google account.',
         });
       }
 
       const existingUser = await getUserProfileByEmailOrUsername(username);
-      const isPreapprovedUsername =
-        existingUser &&
-        (existingUser.uid.startsWith('preapproved-') ||
-          (existing && existingUser.id === existing.id));
-      if (existingUser && !isPreapprovedUsername) {
+      if (existingUser) {
         return res.status(400).json({
           error: 'That User ID (@username) is already taken. Try another handle!',
         });
@@ -202,7 +229,6 @@ async function startServer() {
       const {
         identifier,
         password,
-        isDemoQuickLogin,
         requestCreatorInvite,
       } = req.body || {};
       if (!identifier) {
@@ -219,13 +245,49 @@ async function startServer() {
         });
       }
 
+      if (typeof password !== 'string' || password.length === 0) {
+        return res
+          .status(401)
+          .json({ error: 'A valid password is required.' });
+      }
+
+      const productionAuth = isProductionAuthEnvironment();
+      const isOwnerAccount = isOwnerEmail(profile.email);
+      const ownerLoginPassword = process.env.OWNER_LOGIN_PASSWORD;
       if (
-        !isDemoQuickLogin &&
-        password &&
-        profile.uid !== 'owner-saurabh' &&
-        !profile.uid.startsWith('preapproved-') &&
-        profile.passwordHash !== password &&
-        profile.passwordHash !== 'demo_pass'
+        productionAuth &&
+        isOwnerAccount &&
+        (!ownerLoginPassword || ownerLoginPassword.length < 16)
+      ) {
+        return res.status(503).json({
+          error:
+            'Owner password sign-in is disabled until a strong OWNER_LOGIN_PASSWORD is configured; verified Google Sign-In remains available.',
+        });
+      }
+
+      const usesSeedPassword = ['campus123', 'demo_pass'].includes(
+        profile.passwordHash
+      );
+      if (
+        productionAuth &&
+        ((profile.uid.startsWith('seed-') && usesSeedPassword) ||
+          (!isOwnerAccount && usesSeedPassword))
+      ) {
+        return res.status(403).json({
+          error:
+            'This seeded/demo account cannot use its default password in production.',
+        });
+      }
+
+      const expectedPassword =
+        productionAuth && isOwnerAccount
+          ? ownerLoginPassword!
+          : profile.passwordHash;
+      const suppliedPasswordBytes = Buffer.from(password, 'utf8');
+      const expectedPasswordBytes = Buffer.from(expectedPassword, 'utf8');
+      if (
+        suppliedPasswordBytes.length !== expectedPasswordBytes.length ||
+        !crypto.timingSafeEqual(suppliedPasswordBytes, expectedPasswordBytes)
       ) {
         return res
           .status(401)
@@ -345,13 +407,18 @@ async function startServer() {
         email: profile.email,
         username: profile.username,
       });
-      const isAdmin =
-        isOwnerEmail(profile.email) || profile.role === 'admin';
-      const [portfolio, adminWalletTransactions, ownerUpiConfig] =
+      const isOwner = isOwnerEmail(profile.email);
+      const [
+        portfolio,
+        adminWalletTransactions,
+        ownerUpiConfig,
+        adminPredictors,
+      ] =
         await Promise.all([
           getUserPortfolio(profile.id),
-          isAdmin ? getAllWalletTransactionsForAdmin() : Promise.resolve([]),
+          isOwner ? getAllWalletTransactionsForAdmin() : Promise.resolve([]),
           getOwnerMainUpiConfig(),
+          isOwner ? getAllProfilesWithPositions() : Promise.resolve([]),
         ]);
 
       res.json({
@@ -364,6 +431,7 @@ async function startServer() {
         ownerUpiId: ownerUpiConfig.ownerUpiId,
         ownerUpiName: ownerUpiConfig.ownerUpiName,
         inviteCodes: getInAppInviteCodes(),
+        ...(isOwner ? { adminPredictors } : {}),
       });
     } catch (error: any) {
       console.error('Failed to load /api/me:', error);
@@ -448,16 +516,25 @@ async function startServer() {
         return res.status(401).json({ error: 'Unauthorized' });
       }
       const { marketId, side, amount, walletType } = req.body || {};
-      if (!marketId || (side !== 'YES' && side !== 'NO') || !amount) {
+      const numericMarketId = Number(marketId);
+      const numericAmount = Number(amount);
+      if (
+        !Number.isInteger(numericMarketId) ||
+        numericMarketId <= 0 ||
+        (side !== 'YES' && side !== 'NO') ||
+        !Number.isFinite(numericAmount) ||
+        numericAmount <= 0 ||
+        (walletType !== undefined && !['COINS', 'REAL_INR'].includes(walletType))
+      ) {
         return res.status(400).json({ error: 'Invalid trade parameters' });
       }
 
       const result = await placeTradeAtomic({
         uid: req.user.uid,
         email: req.user.email,
-        marketId: Number(marketId),
+        marketId: numericMarketId,
         side,
-        amount: Number(amount),
+        amount: numericAmount,
         walletType: walletType === 'REAL_INR' ? 'REAL_INR' : 'COINS',
       });
 
@@ -486,18 +563,23 @@ async function startServer() {
         return res.status(401).json({ error: 'Unauthorized' });
       }
       const { positionId, sharesToSell } = req.body || {};
-      if (!positionId) {
+      const numericPositionId = Number(positionId);
+      if (!Number.isInteger(numericPositionId) || numericPositionId <= 0) {
         return res.status(400).json({ error: 'Valid positionId is required' });
+      }
+      let requestedShares: number | undefined;
+      if (sharesToSell !== undefined) {
+        requestedShares = Number(sharesToSell);
+        if (!Number.isFinite(requestedShares) || requestedShares <= 0) {
+          return res.status(400).json({ error: 'sharesToSell must be a positive finite number' });
+        }
       }
 
       const result = await sellPositionEarlyAtomic({
         uid: req.user.uid,
         email: req.user.email,
-        positionId: Number(positionId),
-        sharesToSell:
-          sharesToSell !== undefined && Number(sharesToSell) > 0
-            ? Number(sharesToSell)
-            : undefined,
+        positionId: numericPositionId,
+        sharesToSell: requestedShares,
       });
 
       const [profile, allMarkets, predictors] = await Promise.all([
@@ -887,7 +969,7 @@ async function startServer() {
     }
   );
 
-  // 15. Direct Owner UPI Deposit (Payment goes to Owner's UPI ID -> Immediately credits exact amount to user's live wallet so they can buy/sell YES/NO)
+  // 15. Manual UPI deposit claim. Credits nothing until owner verifies the incoming transfer.
   app.post(
     '/api/wallet/upi-deposit',
     requireAuth,
@@ -903,29 +985,26 @@ async function startServer() {
           amountInr: Number(amountInr),
           utrNumber: String(utrNumber || ''),
           senderUpiId: upiId ? String(upiId) : undefined,
-          paymentApp: paymentApp ? String(paymentApp) : 'Direct UPI QR',
+          paymentApp: paymentApp ? String(paymentApp) : 'UPI',
         });
 
-        const [portfolio, predictors, adminWalletTransactions] =
-          await Promise.all([
-            getUserPortfolio(result.user.id),
-            getAllProfilesWithPositions(),
-            getAllWalletTransactionsForAdmin(),
-          ]);
+        const [portfolio, predictors] = await Promise.all([
+          getUserPortfolio(result.user.id),
+          getAllProfilesWithPositions(),
+        ]);
 
         res.json({
           user: result.user,
           walletTransaction: result.walletTransaction,
           utrNumber: result.utrNumber,
           addedInr: result.addedInr,
-          requestedInr: result.addedInr || result.pendingAmountInr,
+          requestedInr: result.pendingAmountInr,
           pendingAmountInr: result.pendingAmountInr,
-          status: result.walletTransaction?.status || 'APPROVED',
+          status: result.walletTransaction?.status || 'PENDING',
           ownerUpiId: result.ownerUpiId,
           positions: portfolio.positions,
           transactions: portfolio.transactions,
           walletTransactions: portfolio.walletTransactions,
-          adminWalletTransactions,
           predictors,
         });
       } catch (error: any) {
@@ -1007,12 +1086,10 @@ async function startServer() {
           upiId: String(upiId || ''),
         });
 
-        const [portfolio, predictors, adminWalletTransactions] =
-          await Promise.all([
-            getUserPortfolio(result.user.id),
-            getAllProfilesWithPositions(),
-            getAllWalletTransactionsForAdmin(),
-          ]);
+        const [portfolio, predictors] = await Promise.all([
+          getUserPortfolio(result.user.id),
+          getAllProfilesWithPositions(),
+        ]);
 
         res.json({
           user: result.user,
@@ -1021,7 +1098,6 @@ async function startServer() {
           positions: portfolio.positions,
           transactions: portfolio.transactions,
           walletTransactions: portfolio.walletTransactions,
-          adminWalletTransactions,
           predictors,
         });
       } catch (error: any) {
@@ -1134,19 +1210,28 @@ async function startServer() {
     try {
       const webhookSecret = process.env.WEBHOOK_SECRET;
       const signature = req.headers['x-razorpay-signature'] as string;
-      if (!webhookSecret || !signature) {
+      const rawBody = (req as AuthRequest & { rawBody?: Buffer }).rawBody;
+      if (!webhookSecret || !signature || !rawBody) {
         return res
           .status(400)
           .json({ error: 'Missing WEBHOOK_SECRET or signature header' });
       }
-      const rawBody = JSON.stringify(req.body || {});
       const expectedSig = crypto
         .createHmac('sha256', webhookSecret)
         .update(rawBody)
         .digest('hex');
-      if (expectedSig !== signature) {
+      if (!/^[a-f0-9]{64}$/i.test(signature)) {
         return res.status(401).json({ error: 'Invalid webhook signature' });
       }
+      const expectedBytes = Buffer.from(expectedSig, 'hex');
+      const providedBytes = Buffer.from(signature, 'hex');
+      if (
+        expectedBytes.length !== providedBytes.length ||
+        !crypto.timingSafeEqual(expectedBytes, providedBytes)
+      ) {
+        return res.status(401).json({ error: 'Invalid webhook signature' });
+      }
+      // A valid signature is acknowledged only; this endpoint does not credit wallets.
       res.json({ received: true });
     } catch (error: any) {
       res.status(400).json({ error: error.message || 'Webhook error' });

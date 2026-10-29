@@ -39,8 +39,8 @@ CREATE TABLE IF NOT EXISTS public.markets (
   resolution_rules TEXT NOT NULL DEFAULT 'Resolves based on official public announcement or verified campus notice.',
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'cancelled')),
   outcome TEXT CHECK (outcome IN ('YES', 'NO')),
-  yes_pool INTEGER NOT NULL DEFAULT 5000 CHECK (yes_pool > 0),
-  no_pool INTEGER NOT NULL DEFAULT 5000 CHECK (no_pool > 0),
+  yes_pool DOUBLE PRECISION NOT NULL DEFAULT 5000 CHECK (yes_pool > 0),
+  no_pool DOUBLE PRECISION NOT NULL DEFAULT 5000 CHECK (no_pool > 0),
   total_volume INTEGER NOT NULL DEFAULT 0,
   closes_at TIMESTAMPTZ NOT NULL,
   created_by INTEGER REFERENCES public.profiles(id) ON DELETE SET NULL,
@@ -59,8 +59,8 @@ CREATE TABLE IF NOT EXISTS public.positions (
   shares_quantity NUMERIC(14, 4) NOT NULL DEFAULT 0,  -- Exact fractional shares: Investment Amount / Current Share Price
   invested_coins INTEGER NOT NULL,
   invested_amount NUMERIC(14, 2) NOT NULL DEFAULT 0,
-  entry_price INTEGER NOT NULL CHECK (entry_price BETWEEN 1 AND 99),
-  exit_price INTEGER,
+  entry_price DOUBLE PRECISION NOT NULL CHECK (entry_price BETWEEN 1 AND 99),
+  exit_price DOUBLE PRECISION,
   realized_pnl NUMERIC(14, 2) NOT NULL DEFAULT 0,
   exited_early BOOLEAN NOT NULL DEFAULT FALSE,
   settled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS public.trades (
   side TEXT NOT NULL CHECK (side IN ('YES', 'NO')),
   wallet_type TEXT NOT NULL DEFAULT 'COINS' CHECK (wallet_type IN ('COINS', 'REAL_INR')),
   shares_quantity NUMERIC(14, 4) NOT NULL,
-  execution_price INTEGER NOT NULL CHECK (execution_price BETWEEN 1 AND 99),
+  execution_price DOUBLE PRECISION NOT NULL CHECK (execution_price BETWEEN 1 AND 99),
   total_amount NUMERIC(14, 2) NOT NULL,
   realized_pnl NUMERIC(14, 2) NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -109,3 +109,14 @@ CREATE TABLE IF NOT EXISTS public.wallet_transactions (
   reviewed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- A payment reference can be claimed or credited only once across the ledger.
+CREATE UNIQUE INDEX IF NOT EXISTS wallet_transactions_gateway_order_id_unique
+  ON public.wallet_transactions (gateway_order_id)
+  WHERE gateway_order_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS wallet_transactions_utr_number_unique
+  ON public.wallet_transactions (utr_number)
+  WHERE utr_number IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS wallet_transactions_gateway_payment_id_unique
+  ON public.wallet_transactions (gateway_payment_id)
+  WHERE gateway_payment_id IS NOT NULL;

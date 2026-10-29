@@ -1,7 +1,7 @@
 /**
  * Core Polymarket / Kalshi Trading Engine (₹100 Base Settlement per 1.0000 Full Share),
  * Early Exit (Sell Before Final Result) Profit Booking & Stop-Loss Math,
- * Direct Manual UPI QR + 12-Digit UTR Validation, and Granular RBAC Helpers.
+ * Manual UPI Deposit Validation, and Granular RBAC Helpers.
  */
 
 export type TradeSide = 'YES' | 'NO';
@@ -34,7 +34,7 @@ export interface TradePreview {
   investmentAmount: number;
   executionPrice: number;
   shares: number;          // Legacy compatibility: potentialPayout (sharesQuantity * 100)
-  sharesAllocated: number; // Exact fractional shares: Number((amount / executionPrice).toFixed(4))
+  sharesAllocated: number; // Fractional shares minted by integrating the pool curve, rounded down to 4 dp
   contracts: number;       // Alias for sharesAllocated (1 full share settles at ₹100)
   potentialPayout: number; // Total payout if side wins: Number((sharesAllocated * 100).toFixed(2))
   netProfit: number;
@@ -52,8 +52,9 @@ export interface EarlyExitSellPreview {
   sellPercentage: number;
   entryPrice: number;
   currentLivePrice: number;
+  executionPrice: number; // Average executable sell price after pool impact
   costBasisSold: number;
-  payoutAmount: number; // Exact formula: Shares Sold * Current Live Market Price
+  payoutAmount: number; // Reverse-curve cash payout after pool impact
   realizedPnl: number;
   realizedRoiPercent: number;
   remainingShares: number;
@@ -63,12 +64,76 @@ export interface EarlyExitSellPreview {
   newNoPool: number;
 }
 
+const MIN_POOL_RESERVE = 1;
+const SHARE_PRECISION = 4;
+
+function finitePositive(value: number, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function floorTo(value: number, precision: number): number {
+  const scale = 10 ** precision;
+  return Math.floor((value + Number.EPSILON) * scale) / scale;
+}
+
+/**
+ * Integrates 1 / executable price while the selected outcome's pool reserve
+ * grows from `fromReserve` to `toReserve`. This is the buy-side cost curve;
+ * using the same integral in reverse for sells prevents a spot-price round trip
+ * from creating value. Prices are bounded to the displayed ₹1..₹99 range.
+ */
+function sharesForReserveIncrease(
+  fromReserve: number,
+  toReserve: number,
+  oppositeReserve: number
+): number {
+  const from = Math.max(MIN_POOL_RESERVE, fromReserve);
+  const to = Math.max(from, toReserve);
+  const other = Math.max(MIN_POOL_RESERVE, oppositeReserve);
+  if (to <= from) return 0;
+
+  const lowerBand = other / 99; // selected-side probability = 1%
+  const upperBand = other * 99; // selected-side probability = 99%
+  const points = [from, lowerBand, upperBand, to]
+    .filter((point) => point > from && point < to)
+    .sort((a, b) => a - b);
+  points.unshift(from);
+  points.push(to);
+
+  let shares = 0;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    if (end <= start) continue;
+    const midpoint = (start + end) / 2;
+    const probability = midpoint / (midpoint + other);
+
+    if (probability <= 0.01) {
+      shares += end - start; // ₹1/share floor
+    } else if (probability >= 0.99) {
+      shares += (end - start) / 99; // ₹99/share cap
+    } else {
+      shares += (end - start + other * Math.log(end / start)) / 100;
+    }
+  }
+  return shares;
+}
+
+function getSelectedPools(yesPool: number, noPool: number, side: TradeSide) {
+  const safeYes = finitePositive(yesPool, 5000);
+  const safeNo = finitePositive(noPool, 5000);
+  return side === 'YES'
+    ? { selected: safeYes, opposite: safeNo }
+    : { selected: safeNo, opposite: safeYes };
+}
+
 /**
  * Calculates implied YES and NO prices in ₹1..₹99 (where YES Price + NO Price = ₹100).
  */
 export function calculateMarketPrices(yesPool: number, noPool: number): MarketPrices {
-  const safeYes = Math.max(1, Number(yesPool) || 5000);
-  const safeNo = Math.max(1, Number(noPool) || 5000);
+  const safeYes = finitePositive(yesPool, 5000);
+  const safeNo = finitePositive(noPool, 5000);
   const total = safeYes + safeNo;
 
   const rawYes = Math.round((safeYes / total) * BASE_SETTLEMENT_VALUE);
@@ -84,11 +149,9 @@ export function calculateMarketPrices(yesPool: number, noPool: number): MarketPr
 }
 
 /**
- * Polymarket / Kalshi ₹100-Base Buy Preview:
- * - Share Price is between ₹1 and ₹99 (`YES + NO = ₹100`).
- * - `Shares Allocated = Investment Amount / Current Share Price` (supports fractional & whole shares, e.g. ₹10 at ₹60 = 0.1667 shares; ₹6,000 at ₹60 = 100 shares).
- * - Each 1.0000 winning share settles at ₹100 (`Potential Payout = Shares Allocated * 100`).
- * - Dynamic AMM pool shift increases the bought side's price and decreases the opposite side's price proportionally.
+ * AMM buy preview: cash is added to the chosen outcome's pool and fractional
+ * shares are calculated by integrating the changing price along the entire
+ * trade, not by multiplying at the pre-trade spot price.
  */
 export function calculateTradePreview(
   yesPool: number,
@@ -96,25 +159,38 @@ export function calculateTradePreview(
   side: TradeSide,
   amount: number
 ): TradePreview {
-  const cleanAmount = Math.max(0, Number(Number(amount || 0).toFixed(2)));
+  const numericAmount = Number(amount);
+  const cleanAmount =
+    Number.isFinite(numericAmount) && numericAmount > 0
+      ? Number(numericAmount.toFixed(2))
+      : 0;
+  const { selected, opposite } = getSelectedPools(yesPool, noPool, side);
   const { yesPrice, noPrice } = calculateMarketPrices(yesPool, noPool);
-  const executionPrice = side === 'YES' ? yesPrice : noPrice;
+  const spotPrice = side === 'YES' ? yesPrice : noPrice;
+  const rawSharesAllocated =
+    cleanAmount > 0
+      ? sharesForReserveIncrease(selected, selected + cleanAmount, opposite)
+      : 0;
+  // Round down so share precision can never give the buyer more than paid for.
+  const sharesAllocated = floorTo(rawSharesAllocated, SHARE_PRECISION);
+  // Quote the full-curve average before share-precision flooring; dividing by
+  // the rounded quantity can spuriously exceed the ₹99 database price ceiling.
+  const rawExecutionPrice =
+    rawSharesAllocated > 0 ? cleanAmount / rawSharesAllocated : spotPrice;
+  const executionPrice =
+    Math.min(BASE_SETTLEMENT_VALUE - 1, Math.max(1, rawExecutionPrice));
 
-  // Fractional & Whole Shares formula: Shares Allocated = Investment Amount / Current Share Price
-  const rawSharesAllocated = cleanAmount > 0 ? cleanAmount / executionPrice : 0;
-  const sharesAllocated = Number(rawSharesAllocated.toFixed(4));
-
-  // Winning shares settle at ₹100 per 1 full share
-  const potentialPayout = Number((sharesAllocated * BASE_SETTLEMENT_VALUE).toFixed(2));
-  const netProfit = Number(Math.max(0, potentialPayout - cleanAmount).toFixed(2));
+  const potentialPayout = Number(
+    (sharesAllocated * BASE_SETTLEMENT_VALUE).toFixed(2)
+  );
+  const netProfit = Number((potentialPayout - cleanAmount).toFixed(2));
   const returnPercentage =
     cleanAmount > 0
       ? Number((((potentialPayout - cleanAmount) / cleanAmount) * 100).toFixed(1))
       : 0;
 
-  const poolDelta = Math.max(0, Math.round(cleanAmount));
-  const newYesPool = side === 'YES' ? Math.max(100, Number(yesPool) + poolDelta) : Math.max(100, Number(yesPool));
-  const newNoPool = side === 'NO' ? Math.max(100, Number(noPool) + poolDelta) : Math.max(100, Number(noPool));
+  const newYesPool = side === 'YES' ? selected + cleanAmount : opposite;
+  const newNoPool = side === 'NO' ? selected + cleanAmount : opposite;
   const newPrices = calculateMarketPrices(newYesPool, newNoPool);
 
   return {
@@ -136,11 +212,9 @@ export function calculateTradePreview(
 }
 
 /**
- * Early Exit (Sell Before Final Result / Profit Booking & Stop-Loss):
- * - Users can sell their YES or NO shares (fully or partially) at any time while the event is open.
- * - Formula on Early Exit: `Payout = Shares Sold * Current Live Market Price`
- * - Example: Bought 100 YES shares at ₹60 (₹6,000). Live price rises to ₹80 -> Payout = 100 * ₹80 = ₹8,000 (+₹2,000 profit).
- * - If live price drops to ₹25 -> Payout = 100 * ₹25 = ₹2,500 (-₹3,500 stop-loss).
+ * Calculates the exact reverse-curve sell quote. The pool payout is found by
+ * inverting the buy integral with binary search, so selling the shares just
+ * bought against an unchanged market returns no more than the original stake.
  */
 export function calculateEarlyExitSell(params: {
   yesPool: number;
@@ -150,44 +224,78 @@ export function calculateEarlyExitSell(params: {
   sharesToSell: number;
   entryPrice: number;
 }): EarlyExitSellPreview {
-  const safeHeld = Math.max(0, Number(Number(params.sharesHeld || 0).toFixed(4)));
-  const clampedToSell = Math.max(
-    0,
-    Math.min(safeHeld, Number(Number(params.sharesToSell || 0).toFixed(4)))
+  const heldValue = Number(params.sharesHeld);
+  const requestedValue = Number(params.sharesToSell);
+  const safeHeld = floorTo(
+    Number.isFinite(heldValue) ? Math.max(0, heldValue) : 0,
+    SHARE_PRECISION
+  );
+  const requested = floorTo(
+    Number.isFinite(requestedValue) ? Math.max(0, requestedValue) : 0,
+    SHARE_PRECISION
+  );
+  const { selected, opposite } = getSelectedPools(
+    params.yesPool,
+    params.noPool,
+    params.side
   );
   const { yesPrice, noPrice } = calculateMarketPrices(params.yesPool, params.noPool);
   const currentLivePrice = params.side === 'YES' ? yesPrice : noPrice;
 
-  const payoutAmount = Number((clampedToSell * currentLivePrice).toFixed(2));
-  const costBasisSold = Number((clampedToSell * Number(params.entryPrice || currentLivePrice)).toFixed(2));
+  const maxPayout = Math.max(0, selected - MIN_POOL_RESERVE);
+  const maxSellableShares = sharesForReserveIncrease(
+    selected - maxPayout,
+    selected,
+    opposite
+  );
+  const sharesToSell = Math.min(safeHeld, requested, maxSellableShares);
+
+  let low = 0;
+  let high = maxPayout;
+  for (let iteration = 0; iteration < 64 && sharesToSell > 0; iteration += 1) {
+    const midpoint = (low + high) / 2;
+    const reverseShares = sharesForReserveIncrease(
+      selected - midpoint,
+      selected,
+      opposite
+    );
+    if (reverseShares < sharesToSell) low = midpoint;
+    else high = midpoint;
+  }
+
+  // Round cash down to cents so a precision boundary cannot create a free gain.
+  const payoutAmount = floorTo(low, 2);
+  const executionPrice =
+    sharesToSell > 0 ? payoutAmount / sharesToSell : currentLivePrice;
+  const entryPrice = Number.isFinite(Number(params.entryPrice)) && Number(params.entryPrice) > 0
+    ? Number(params.entryPrice)
+    : currentLivePrice;
+  const costBasisSold = Number((sharesToSell * entryPrice).toFixed(2));
   const realizedPnl = Number((payoutAmount - costBasisSold).toFixed(2));
   const realizedRoiPercent =
     costBasisSold > 0
       ? Number(((realizedPnl / costBasisSold) * 100).toFixed(1))
       : 0;
-  const remainingShares = Number(Math.max(0, safeHeld - clampedToSell).toFixed(4));
+  const remainingShares = Number(Math.max(0, safeHeld - sharesToSell).toFixed(4));
   const sellPercentage =
-    safeHeld > 0 ? Math.round((clampedToSell / safeHeld) * 100) : 0;
+    safeHeld > 0 ? Math.round((sharesToSell / safeHeld) * 100) : 0;
 
-  // Selling shares reduces the active side's pool proportionally, moving price down on that side
-  const poolReduction = Math.round(payoutAmount);
-  const newYesPool =
-    params.side === 'YES'
-      ? Math.max(100, Number(params.yesPool) - poolReduction)
-      : Math.max(100, Number(params.yesPool));
-  const newNoPool =
-    params.side === 'NO'
-      ? Math.max(100, Number(params.noPool) - poolReduction)
-      : Math.max(100, Number(params.noPool));
+  const newSelectedPool = Math.max(
+    MIN_POOL_RESERVE,
+    selected - payoutAmount
+  );
+  const newYesPool = params.side === 'YES' ? newSelectedPool : opposite;
+  const newNoPool = params.side === 'NO' ? newSelectedPool : opposite;
   const newPrices = calculateMarketPrices(newYesPool, newNoPool);
 
   return {
     side: params.side,
     sharesHeld: safeHeld,
-    sharesToSell: clampedToSell,
+    sharesToSell,
     sellPercentage,
-    entryPrice: Number(params.entryPrice || currentLivePrice),
+    entryPrice,
     currentLivePrice,
+    executionPrice,
     costBasisSold,
     payoutAmount,
     realizedPnl,
@@ -486,24 +594,6 @@ export function validateUtrNumber(rawUtr: string): {
     };
   }
   return { valid: true, clean };
-}
-
-/**
- * Builds a standard NPCI `upi://pay` URI for Direct Manual UPI QR Code & Deep-Link Intent.
- */
-export function buildUpiPaymentUri(params: {
-  upiId?: string;
-  payeeName?: string;
-  amountInr: number;
-  note?: string;
-}): string {
-  const pa = (params.upiId || DEFAULT_OWNER_UPI_ID).trim();
-  const pn = (params.payeeName || DEFAULT_OWNER_UPI_NAME).trim();
-  const am = Math.max(10, Number(params.amountInr) || 0).toFixed(2);
-  const tn = (params.note || 'Up and Down Wallet Deposit').trim();
-  return `upi://pay?pa=${encodeURIComponent(pa)}&pn=${encodeURIComponent(
-    pn
-  )}&am=${encodeURIComponent(am)}&cu=INR&tn=${encodeURIComponent(tn)}`;
 }
 
 export interface UpiDepositCalculation {

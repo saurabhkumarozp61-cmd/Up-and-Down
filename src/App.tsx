@@ -42,6 +42,7 @@ import {
   DEFAULT_OWNER_UPI_ID,
   DEFAULT_OWNER_UPI_NAME,
   isCommunityApprovedUser,
+  isOwnerEmail,
   isRealMoneyEligible,
   OWNER_EMAIL,
   RealMoneyAccessStatus,
@@ -119,6 +120,7 @@ export default function App() {
   // Data State
   const [markets, setMarkets] = useState<MarketItem[]>([]);
   const [predictors, setPredictors] = useState<AccountPredictorEntry[]>([]);
+  const [adminPredictors, setAdminPredictors] = useState<AccountPredictorEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   // Auth & User State
@@ -193,7 +195,13 @@ export default function App() {
 
   const applySessionPayload = (data: any) => {
     if (data.token) saveToken(data.token);
-    if (data.user) setUser(data.user);
+    if (data.user) {
+      setUser(data.user);
+      if (!isOwnerEmail(data.user.email || '')) setAdminPredictors([]);
+    }
+    if (Array.isArray(data.adminPredictors))
+      setAdminPredictors(data.adminPredictors);
+    if (Array.isArray(data.predictors)) setPredictors(data.predictors);
     if (data.positions) setPositions(data.positions);
     if (data.transactions) setTransactions(data.transactions);
     if (data.walletTransactions) setWalletTransactions(data.walletTransactions);
@@ -250,6 +258,9 @@ export default function App() {
         applySessionPayload(meData);
       } else if (meRes.status === 401) {
         saveToken(null);
+        setUser(null);
+        setAdminWalletTransactions([]);
+        setAdminPredictors([]);
       }
       if (lRes.ok) {
         const lData = await lRes.json();
@@ -396,7 +407,6 @@ export default function App() {
   const handleLogin = async (
     identifier: string,
     password: string,
-    isDemoQuickLogin = false,
     requestCreatorInvite = false
   ) => {
     setAuthError(null);
@@ -408,7 +418,6 @@ export default function App() {
         body: JSON.stringify({
           identifier,
           password,
-          isDemoQuickLogin,
           requestCreatorInvite,
         }),
       });
@@ -427,6 +436,7 @@ export default function App() {
       }
 
       await fetchPublicData();
+      await refreshCurrentUser();
     } catch (err: any) {
       setAuthError(err.message || 'Login failed');
     } finally {
@@ -477,6 +487,7 @@ export default function App() {
       }
 
       await fetchPublicData();
+      await refreshCurrentUser();
     } catch (err: any) {
       setAuthError(
         err.message ||
@@ -494,6 +505,7 @@ export default function App() {
     setTransactions([]);
     setWalletTransactions([]);
     setAdminWalletTransactions([]);
+    setAdminPredictors([]);
     setActiveTab('markets');
   };
 
@@ -656,6 +668,11 @@ export default function App() {
       );
     }
     await fetchPublicData();
+    return {
+      sharesSold: Number(data.sellPreview?.sharesToSell || sharesToSell),
+      creditedAmount: Number(data.creditedAmount || 0),
+      executionPrice: Number(data.sellPreview?.executionPrice || 0),
+    };
   };
 
   // Claim Daily 100 Coin Vault Refill Drop (Strictly 1x per 24 hours)
@@ -742,6 +759,7 @@ export default function App() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to update role');
+    applySessionPayload(data);
     if (data.predictors) setPredictors(data.predictors);
     if (
       data.updatedProfile &&
@@ -778,6 +796,7 @@ export default function App() {
     const data = await res.json();
     if (!res.ok)
       throw new Error(data.error || 'Failed to update granular permissions');
+    applySessionPayload(data);
     if (data.predictors) setPredictors(data.predictors);
     if (
       data.updatedProfile &&
@@ -924,6 +943,7 @@ export default function App() {
     const data = await res.json();
     if (!res.ok)
       throw new Error(data.error || 'Failed to update Real Money UPI status');
+    applySessionPayload(data);
     if (data.predictors) setPredictors(data.predictors);
     if (
       data.updatedProfile &&
@@ -942,10 +962,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#090D16] text-white">
-      {/* Strictly Mobile-First Shell (max-w-[430px] mx-auto) */}
-      <div className="max-w-[430px] min-h-screen mx-auto bg-[#090D16] text-white border-x border-slate-800/60 flex flex-col relative pb-20">
+      {/* Responsive app shell: compact on mobile, spacious on desktop. */}
+      <div className="w-full max-w-[1440px] min-h-screen mx-auto bg-[#090D16] text-white border-x border-slate-800/60 flex flex-col relative pb-24">
         {/* Sticky Glassmorphism Top Header */}
-        <header className="sticky top-0 z-30 h-14 px-4 bg-[#090D16]/85 backdrop-blur-md border-b border-[#1E293B] flex items-center justify-between gap-2">
+        <header className="sticky top-0 z-30 h-14 sm:h-16 px-4 sm:px-6 lg:px-10 bg-[#090D16]/85 backdrop-blur-md border-b border-[#1E293B] flex items-center justify-between gap-2">
           {/* Zone 1: Brand Wordmark */}
           <button
             type="button"
@@ -1021,7 +1041,7 @@ export default function App() {
                   className="min-h-[36px] min-w-[36px] px-2 rounded-xl bg-[#131B2E] border border-[#1E293B] flex items-center justify-center gap-1 text-xs font-semibold text-emerald-400 hover:bg-slate-800 transition-colors"
                 >
                   <User className="w-3.5 h-3.5" />
-                  <span className="max-w-[60px] truncate">@{user.username}</span>
+                  <span className="hidden sm:inline max-w-[60px] truncate">@{user.username}</span>
                 </button>
               </>
             ) : (
@@ -1041,12 +1061,12 @@ export default function App() {
         </header>
 
         {/* Main Scrollable Viewport Body */}
-        <main className="flex-1 px-4 pt-3.5 pb-6 space-y-4">
+        <main className="flex-1 px-4 sm:px-6 lg:px-10 pt-4 sm:pt-6 pb-8 space-y-4">
           {/* STRICT RBAC GATE: INVITE-ONLY / WAITING FOR OWNER APPROVAL SCREEN */}
           {user && !communityApproved ? (
             <div
               data-testid="invite-only-waiting-screen"
-              className="bg-[#131B2E] border border-amber-400/50 rounded-3xl p-5 space-y-4 shadow-xl"
+              className="w-full max-w-2xl mx-auto bg-[#131B2E] border border-amber-400/50 rounded-3xl p-5 sm:p-7 space-y-4 shadow-xl"
             >
               <div className="w-12 h-12 rounded-2xl bg-amber-400/15 border border-amber-400/40 flex items-center justify-center text-amber-400 mx-auto">
                 <Lock className="w-6 h-6" />
@@ -1186,14 +1206,14 @@ export default function App() {
               {activeTab === 'markets' && (
                 <div className="space-y-3.5">
                   {/* Polymarket Play Store Inspired Hero Header Banner */}
-                  <div className="bg-gradient-to-br from-[#131B2E] to-[#0D1424] border border-[#1E293B] rounded-2xl p-4">
+                  <div className="bg-gradient-to-br from-[#131B2E] to-[#0D1424] border border-[#1E293B] rounded-2xl sm:rounded-3xl p-5 sm:p-7">
                     <p className="text-[11px] font-extrabold tracking-wider uppercase text-sky-400 mb-0.5">
                       SPORTS, CAMPUS, CREATORS, TECH &amp; MORE
                     </p>
-                    <h1 className="text-3xl font-black font-condensed uppercase tracking-tight text-white leading-none">
+                    <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black font-condensed uppercase tracking-tight text-white leading-none">
                       MARKETS ON EVERYTHING
                     </h1>
-                    <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+                    <p className="text-sm sm:text-base text-slate-400 mt-2.5 leading-relaxed max-w-3xl">
                       Every event trades on a{' '}
                       <strong className="text-slate-200">
                         ₹100 Base (YES + NO = ₹100)
@@ -1212,7 +1232,7 @@ export default function App() {
                       placeholder="Search IPL, Mood Indigo, GTA 6, Exams, F1..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="w-full min-h-[42px] pl-10 pr-4 rounded-xl bg-[#131B2E] border border-[#1E293B] text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
+                      className="w-full min-h-[46px] pl-10 pr-4 rounded-xl bg-[#131B2E] border border-[#1E293B] text-sm text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
                     />
                   </div>
 
@@ -1264,7 +1284,7 @@ export default function App() {
                       </p>
                     </div>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 lg:gap-5">
                       {filteredMarkets.map((market) => (
                         <MarketCard
                           key={market.id}
@@ -1317,7 +1337,11 @@ export default function App() {
                 <AdminStudioView
                   user={user}
                   markets={markets}
-                  predictors={predictors}
+                  predictors={
+                    user && isOwnerEmail(user.email)
+                      ? adminPredictors
+                      : predictors
+                  }
                   adminWalletTransactions={adminWalletTransactions}
                   hasCreatorInvite={hasCreatorInvite}
                   themeMode={themeMode}
@@ -1387,7 +1411,7 @@ export default function App() {
         {/* Sticky Bottom Navigation Bar (Markets, Leaderboard, Portfolio, Account) */}
         <nav
           aria-label="Primary bottom navigation"
-          className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] h-16 bg-[#090D16]/95 backdrop-blur-md border-t border-x border-[#1E293B] grid grid-cols-4 items-center z-30 px-2"
+          className="fixed bottom-0 sm:bottom-5 left-1/2 -translate-x-1/2 w-full max-w-[430px] sm:max-w-[640px] h-16 bg-[#090D16]/95 backdrop-blur-md border-t border-x sm:border border-[#1E293B] rounded-t-2xl sm:rounded-2xl grid grid-cols-4 items-center z-30 px-2 shadow-2xl"
         >
           <button
             type="button"

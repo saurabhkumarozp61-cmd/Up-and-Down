@@ -30,7 +30,6 @@ interface AuthSheetModalProps {
   onLogin: (
     identifier: string,
     password: string,
-    isDemoQuickLogin?: boolean,
     requestCreatorInvite?: boolean
   ) => void;
   onGoogleLogin: (
@@ -89,7 +88,7 @@ export const AuthSheetModal = ({
   const handleLoginSubmit = (e: FormEvent) => {
     e.preventDefault();
     setTelegramNotice(null);
-    onLogin(loginIdentifier, loginPassword, false, hasCreatorInvite);
+    onLogin(loginIdentifier, loginPassword, hasCreatorInvite);
   };
 
   // Strictly verify real Telegram WebApp context — never auto-create a random account outside Telegram!
@@ -447,4 +446,3 @@ export const AuthSheetModal = ({
     </div>
   );
 };
-

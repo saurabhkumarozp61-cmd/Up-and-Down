@@ -427,9 +427,16 @@ export async function getAllProfilesWithPositions() {
             ? pos.sharesQuantity
             : Number((pos.shares / 100).toFixed(4));
         if (m && m.status === 'open') {
-          const prices = calculateMarketPrices(m.yesPool, m.noPool);
-          const currentPrice = pos.side === 'YES' ? prices.yesPrice : prices.noPrice;
-          activePortfolioValue += Math.round(sharesQty * currentPrice);
+          const exitValue = calculateEarlyExitSell({
+            yesPool: m.yesPool,
+            noPool: m.noPool,
+            side: pos.side as TradeSide,
+            sharesHeld: sharesQty,
+            sharesToSell: sharesQty,
+            entryPrice: pos.entryPrice,
+          }).payoutAmount;
+          activePortfolioValue +=
+            pos.walletType === 'COINS' ? Math.floor(exitValue) : exitValue;
         } else {
           activePortfolioValue += pos.investedCoins;
         }
@@ -862,11 +869,20 @@ export async function getUserPortfolio(userId: number) {
           ? Number(pos.investedAmount.toFixed(2))
           : pos.investedCoins;
 
-      // Live Early-Exit Sell Value: Shares Held * Current Live Market Price
-      const currentValue =
+      // Estimated executable bid after pool impact, not shares × the mid price.
+      const exitQuote =
         m && m.status === 'open' && !pos.settled
-          ? Number((sharesQuantity * currentPrice).toFixed(2))
+          ? calculateEarlyExitSell({
+              yesPool: m.yesPool,
+              noPool: m.noPool,
+              side: pos.side as TradeSide,
+              sharesHeld: sharesQuantity,
+              sharesToSell: sharesQuantity,
+              entryPrice: pos.entryPrice,
+            }).payoutAmount
           : pos.payoutCoins;
+      const currentValue =
+        pos.walletType === 'COINS' ? Math.floor(exitQuote) : exitQuote;
 
       // Winning Settlement Value: Shares Held * ₹100
       const potentialPayout = Number((sharesQuantity * 100).toFixed(2));
@@ -887,6 +903,8 @@ export async function getUserPortfolio(userId: number) {
         marketCategory: m ? m.category : 'Campus Gossip',
         marketStatus: m ? m.status : 'open',
         marketOutcome: m ? m.outcome : null,
+        marketYesPool: m?.yesPool ?? 5000,
+        marketNoPool: m?.noPool ?? 5000,
         currentPrice,
         currentValue,
         unrealizedPnl,
@@ -924,14 +942,16 @@ export async function placeTradeAtomic(params: {
       let userRows = await tx
         .select()
         .from(profiles)
-        .where(eq(profiles.uid, params.uid));
+        .where(eq(profiles.uid, params.uid))
+        .for('update');
       let rawUser = userRows[0];
 
       if (!rawUser && params.email) {
         const byEmail = await tx
           .select()
           .from(profiles)
-          .where(eq(profiles.email, params.email.trim().toLowerCase()));
+          .where(eq(profiles.email, params.email.trim().toLowerCase()))
+          .for('update');
         rawUser = byEmail[0];
       }
 
@@ -949,13 +969,18 @@ export async function placeTradeAtomic(params: {
 
       const mode: WalletMode =
         params.walletType === 'REAL_INR' ? 'REAL_INR' : 'COINS';
-      const cleanAmount = Number(Number(params.amount || 0).toFixed(2));
-      if (cleanAmount <= 0) {
+      const rawAmount = Number(params.amount);
+      if (!Number.isFinite(rawAmount)) throw new Error('Trade amount must be a finite number.');
+      const cleanAmount = Number(rawAmount.toFixed(2));
+      if (cleanAmount < 10) {
         throw new Error(
           mode === 'REAL_INR'
-            ? 'Bet amount must be greater than ₹0'
-            : 'Trade amount must be greater than 0 Coins'
+            ? 'Minimum trade amount is ₹10.'
+            : 'Minimum trade amount is 10 Coins.'
         );
+      }
+      if (mode === 'COINS' && !Number.isInteger(cleanAmount)) {
+        throw new Error('Virtual Coin trades must use whole Coins.');
       }
 
       if (mode === 'REAL_INR') {
@@ -982,7 +1007,8 @@ export async function placeTradeAtomic(params: {
       const marketRows = await tx
         .select()
         .from(markets)
-        .where(eq(markets.id, params.marketId));
+        .where(eq(markets.id, params.marketId))
+        .for('update');
       const market = marketRows[0];
       if (!market) {
         throw new Error('Market not found');
@@ -1106,8 +1132,8 @@ export async function placeTradeAtomic(params: {
 /**
  * 1B. Core Trading Engine: Early Exit (Sell Before Final Result / Profit Booking & Stop-Loss)
  * - Users can sell their YES or NO shares (fully or partially) at any time while the event is still open.
- * - Formula on Early Exit: `Payout = Shares Sold * Current Live Market Price`.
- * - Immediately credits the live payout to the user's wallet balance and shifts the AMM pool.
+ * - Uses the inverse AMM curve to quote the executable payout after pool impact.
+ * - Locks profile, position, and market rows while updating the wallet and reserves.
  */
 export async function sellPositionEarlyAtomic(params: {
   uid: string;
@@ -1120,14 +1146,16 @@ export async function sellPositionEarlyAtomic(params: {
       let userRows = await tx
         .select()
         .from(profiles)
-        .where(eq(profiles.uid, params.uid));
+        .where(eq(profiles.uid, params.uid))
+        .for('update');
       let rawUser = userRows[0];
 
       if (!rawUser && params.email) {
         const byEmail = await tx
           .select()
           .from(profiles)
-          .where(eq(profiles.email, params.email.trim().toLowerCase()));
+          .where(eq(profiles.email, params.email.trim().toLowerCase()))
+          .for('update');
         rawUser = byEmail[0];
       }
 
@@ -1139,7 +1167,8 @@ export async function sellPositionEarlyAtomic(params: {
       const posRows = await tx
         .select()
         .from(positions)
-        .where(eq(positions.id, params.positionId));
+        .where(eq(positions.id, params.positionId))
+        .for('update');
       const pos = posRows[0];
       if (!pos || pos.userId !== user.id) {
         throw new Error('Position not found in your portfolio.');
@@ -1151,11 +1180,12 @@ export async function sellPositionEarlyAtomic(params: {
       const marketRows = await tx
         .select()
         .from(markets)
-        .where(eq(markets.id, pos.marketId));
+        .where(eq(markets.id, pos.marketId))
+        .for('update');
       const market = marketRows[0];
       if (!market || market.status !== 'open') {
         throw new Error(
-          'Early Exit is only available while the event is live and open.'
+          'Early Exit is only available while the event is active and open.'
         );
       }
 
@@ -1167,10 +1197,15 @@ export async function sellPositionEarlyAtomic(params: {
         throw new Error('No active shares remaining to sell.');
       }
 
-      const requestedShares =
-        params.sharesToSell && params.sharesToSell > 0
-          ? Math.min(sharesHeld, Number(params.sharesToSell.toFixed(4)))
-          : sharesHeld;
+      const requestedRaw =
+        params.sharesToSell === undefined ? sharesHeld : Number(params.sharesToSell);
+      if (!Number.isFinite(requestedRaw) || requestedRaw <= 0) {
+        throw new Error('Enter a positive number of shares to sell.');
+      }
+      const requestedShares = Math.min(
+        sharesHeld,
+        Number(requestedRaw.toFixed(4))
+      );
 
       const sellPreview = calculateEarlyExitSell({
         yesPool: market.yesPool,
@@ -1182,7 +1217,18 @@ export async function sellPositionEarlyAtomic(params: {
       });
 
       const isRealInr = pos.walletType === 'REAL_INR';
-      const payout = sellPreview.payoutAmount;
+      const payout = isRealInr
+        ? sellPreview.payoutAmount
+        : Math.floor(sellPreview.payoutAmount);
+      if (payout <= 0) {
+        throw new Error('The position is too small to sell for a positive payout.');
+      }
+      const executionPrice = payout / sellPreview.sharesToSell;
+      const realizedPnl = Number((payout - sellPreview.costBasisSold).toFixed(2));
+      const newYesPool =
+        pos.side === 'YES' ? Math.max(1, market.yesPool - payout) : market.yesPool;
+      const newNoPool =
+        pos.side === 'NO' ? Math.max(1, market.noPool - payout) : market.noPool;
 
       if (isRealInr) {
         const nextWalletInr = Number(
@@ -1196,7 +1242,7 @@ export async function sellPositionEarlyAtomic(params: {
           })
           .where(eq(profiles.id, user.id));
       } else {
-        const nextCoins = Math.round(user.coinBalance + payout);
+        const nextCoins = user.coinBalance + payout;
         await tx
           .update(profiles)
           .set({ coinBalance: nextCoins })
@@ -1206,8 +1252,8 @@ export async function sellPositionEarlyAtomic(params: {
       const updatedMarketRows = await tx
         .update(markets)
         .set({
-          yesPool: sellPreview.newYesPool,
-          noPool: sellPreview.newNoPool,
+          yesPool: newYesPool,
+          noPool: newNoPool,
           totalVolume: market.totalVolume + Math.round(payout),
         })
         .where(eq(markets.id, market.id))
@@ -1222,7 +1268,7 @@ export async function sellPositionEarlyAtomic(params: {
             Math.max(0, currentInvestedAmount - sellPreview.costBasisSold).toFixed(2)
           );
       const nextRealizedPnl = Number(
-        ((pos.realizedPnl || 0) + sellPreview.realizedPnl).toFixed(2)
+        ((pos.realizedPnl || 0) + realizedPnl).toFixed(2)
       );
 
       const updatedPosRows = await tx
@@ -1234,7 +1280,7 @@ export async function sellPositionEarlyAtomic(params: {
           investedCoins: Math.round(nextInvestedAmount),
           settled: isFullExit,
           exitedEarly: true,
-          exitPrice: sellPreview.currentLivePrice,
+          exitPrice: executionPrice,
           realizedPnl: nextRealizedPnl,
           payoutCoins: Math.round((pos.payoutCoins || 0) + payout),
         })
@@ -1249,14 +1295,15 @@ export async function sellPositionEarlyAtomic(params: {
         side: pos.side,
         walletType: pos.walletType,
         shares: sellPreview.sharesToSell,
-        executionPrice: sellPreview.currentLivePrice,
+        executionPrice,
         totalAmount: payout,
       });
 
+      const pnlUnit = isRealInr ? '₹' : '';
       const pnlTag =
-        sellPreview.realizedPnl >= 0
-          ? `+₹${sellPreview.realizedPnl.toFixed(2)} Profit`
-          : `-₹${Math.abs(sellPreview.realizedPnl).toFixed(2)} Stop-Loss`;
+        realizedPnl >= 0
+          ? `+${pnlUnit}${realizedPnl.toFixed(2)} Profit`
+          : `-${pnlUnit}${Math.abs(realizedPnl).toFixed(2)} Stop-Loss`;
 
       if (isRealInr) {
         await tx.insert(walletTransactions).values({
@@ -1267,7 +1314,7 @@ export async function sellPositionEarlyAtomic(params: {
           type: 'TRADE_SELL',
           status: 'COMPLETED',
           amountInr: payout,
-          notes: `Early Exit Sold ${sellPreview.sharesToSell} ${pos.side} shares @ ₹${sellPreview.currentLivePrice}/sh (${pnlTag}) on "${market.title.slice(0, 38)}"`,
+          notes: `Early Exit Sold ${sellPreview.sharesToSell} ${pos.side} shares @ ₹${executionPrice.toFixed(2)}/sh (${pnlTag}) on "${market.title.slice(0, 38)}"`,
         });
       }
 
@@ -1277,14 +1324,23 @@ export async function sellPositionEarlyAtomic(params: {
         type: isRealInr ? 'REAL_TRADE_SELL' : 'TRADE_SELL',
         amount: Math.round(payout),
         description: isRealInr
-          ? `Early Exit: Sold ${sellPreview.sharesToSell} ${pos.side} sh @ ₹${sellPreview.currentLivePrice} → Credited ₹${payout.toLocaleString('en-IN')} (${pnlTag})`
-          : `Early Exit: Sold ${sellPreview.sharesToSell} ${pos.side} sh @ ${sellPreview.currentLivePrice} Coins → Credited ${Math.round(payout)} Coins`,
+          ? `Early Exit: Sold ${sellPreview.sharesToSell} ${pos.side} sh @ ₹${executionPrice.toFixed(2)} → Credited ₹${payout.toLocaleString('en-IN')} (${pnlTag})`
+          : `Early Exit: Sold ${sellPreview.sharesToSell} ${pos.side} sh @ ${executionPrice.toFixed(2)} Coins → Credited ${payout} Coins`,
       });
 
       return {
         position: updatedPosRows[0],
         updatedMarket: updatedMarketRows[0],
-        sellPreview,
+        sellPreview: {
+          ...sellPreview,
+          payoutAmount: payout,
+          executionPrice,
+          realizedPnl,
+          newYesPool,
+          newNoPool,
+          newYesPrice: calculateMarketPrices(newYesPool, newNoPool).yesPrice,
+          newNoPrice: calculateMarketPrices(newYesPool, newNoPool).noPrice,
+        },
         creditedAmount: payout,
         walletType: pos.walletType,
       };
@@ -2173,11 +2229,10 @@ export async function updateRealMoneyStatusByOwner(params: {
 }
 
 /**
- * 3. Direct UPI Payment to Owner's Main UPI ID:
- * - Payment goes directly to the Owner's Main UPI ID (`ownerUpiId`, e.g. `9931802215@fam` / `saurabh@okaxis`).
- * - Immediately credits the exact deposited amount (`amountInr`) to the user's live wallet (`walletBalanceInr` & `realMoneyBalance`)
- *   so the user sees their added funds right away and can immediately buy or sell YES or NO shares!
- * - Also records the transaction in `wallet_transactions` so the Owner has full visibility and control in the Admin Panel.
+ * 3. Manual UPI deposit claims:
+ * - A submitted UTR creates a PENDING ledger item only; it never credits wallet funds by itself.
+ * - Owner review must verify the incoming transfer before a single credit is applied.
+ * - A unique ledger index prevents the same reference from being claimed twice.
  */
 export async function submitManualUpiDepositPending(params: {
   uid: string;
@@ -2189,75 +2244,46 @@ export async function submitManualUpiDepositPending(params: {
 }) {
   try {
     const user = await getUserProfileByUid(params.uid, params.email);
-    if (!user) {
-      throw new Error('User profile not found');
-    }
-
+    if (!user) throw new Error('User profile not found');
     if (!isRealMoneyEligible(user)) {
-      throw new Error(
-        'Real Money Wallet & Trading is Invite-Only. Enter an in-app Invite Code (e.g. UPDOWN2026) or ask the Owner to approve your account first!'
-      );
+      throw new Error('Real Money UPI deposits are invite-only.');
     }
 
     const calc = calculateUpiDepositSummary(params.amountInr);
-    if (!calc.valid) {
-      throw new Error(calc.error || 'Invalid deposit amount.');
+    if (!calc.valid) throw new Error(calc.error || 'Invalid deposit amount.');
+
+    const utr = validateUtrNumber(String(params.utrNumber || ''));
+    if (!utr.valid) {
+      throw new Error(utr.error || 'Enter the UTR from a completed UPI transfer.');
     }
-
-    const rawUtr = (params.utrNumber || '').replace(/\s+/g, '').trim();
-    const cleanUtr = /^\d{12}$/.test(rawUtr)
-      ? rawUtr
-      : `${Date.now().toString().slice(-8)}${Math.floor(
-          1000 + Math.random() * 9000
-        )}`;
-
-    // Prevent duplicate 12-digit UTR reuse if user supplied a specific UTR
-    if (/^\d{12}$/.test(rawUtr)) {
-      const existingWalletTxs = await db
-        .select()
-        .from(walletTransactions)
-        .where(eq(walletTransactions.utrNumber, cleanUtr));
-      if (
-        existingWalletTxs.some(
-          (t) =>
-            t.status === 'PENDING' ||
-            t.status === 'APPROVED' ||
-            t.status === 'COMPLETED'
-        )
-      ) {
-        throw new Error(
-          `UTR ${cleanUtr} has already been used. Each 12-digit UTR can only be used once.`
-        );
-      }
+    const sender = validateUpiId(
+      String(params.senderUpiId || user.upiId || '')
+    );
+    if (!sender.valid) {
+      throw new Error(sender.error || 'Enter the sender UPI ID used for this transfer.');
     }
 
     const { ownerUpiId } = await getOwnerMainUpiConfig();
-    const cleanSenderUpi =
-      params.senderUpiId && params.senderUpiId.trim()
-        ? params.senderUpiId.trim().toLowerCase()
-        : user.upiId || ownerUpiId;
-    const appLabel = (params.paymentApp || 'Direct UPI QR').trim();
+    const appLabel = String(params.paymentApp || 'UPI').trim().slice(0, 80);
 
     return await db.transaction(async (tx) => {
+      const existing = await tx
+        .select()
+        .from(walletTransactions)
+        .where(eq(walletTransactions.utrNumber, utr.clean));
+      if (existing.length > 0) {
+        throw new Error('This UTR has already been submitted. Each transfer can be claimed once.');
+      }
+
       const freshRows = await tx
         .select()
         .from(profiles)
-        .where(eq(profiles.id, user.id));
-      const freshUser = normalizeUserProfile(freshRows[0] || user);
-
-      const nextWalletInr = Number(
-        (freshUser.walletBalanceInr + calc.netWalletCreditInr).toFixed(2)
-      );
-
-      const updatedUserRows = await tx
-        .update(profiles)
-        .set({
-          walletBalanceInr: nextWalletInr,
-          realMoneyBalance: Math.round(nextWalletInr),
-          upiId: cleanSenderUpi,
-        })
         .where(eq(profiles.id, user.id))
-        .returning();
+        .for('update');
+      const freshUser = normalizeUserProfile(freshRows[0] || user);
+      if (!isRealMoneyEligible(freshUser)) {
+        throw new Error('Real Money UPI deposits are invite-only.');
+      }
 
       const insertedWalletTx = await tx
         .insert(walletTransactions)
@@ -2266,48 +2292,41 @@ export async function submitManualUpiDepositPending(params: {
           username: user.username,
           userEmail: user.email,
           type: 'DEPOSIT',
-          status: 'APPROVED',
+          status: 'PENDING',
           amountInr: calc.netWalletCreditInr,
-          utrNumber: cleanUtr,
+          utrNumber: utr.clean,
           upiId: ownerUpiId,
-          notes: `Paid ₹${calc.netWalletCreditInr.toLocaleString(
+          notes: `Unverified deposit claim ₹${calc.netWalletCreditInr.toLocaleString(
             'en-IN'
-          )} via ${appLabel} to Owner UPI (${ownerUpiId}) · Sender: ${cleanSenderUpi} · UTR ${cleanUtr}`,
+          )} via ${appLabel} · Sender ${sender.clean} · UTR ${utr.clean}. No funds credited; owner must verify receipt.`,
         })
         .returning();
 
-      await tx.insert(transactions).values({
-        userId: user.id,
-        type: 'REAL_DEPOSIT_UPI',
-        amount: Math.round(calc.netWalletCreditInr),
-        description: `Added ₹${calc.netWalletCreditInr.toLocaleString(
-          'en-IN'
-        )} via ${appLabel} to Owner UPI (${ownerUpiId}) · UTR ${cleanUtr}`,
-      });
-
       return {
-        user: normalizeUserProfile(updatedUserRows[0]),
+        user: freshUser,
         walletTransaction: insertedWalletTx[0],
-        utrNumber: cleanUtr,
-        addedInr: calc.netWalletCreditInr,
-        pendingAmountInr: 0,
+        utrNumber: utr.clean,
+        addedInr: 0,
+        pendingAmountInr: calc.netWalletCreditInr,
         ownerUpiId,
       };
     });
   } catch (error: any) {
+    if (error?.code === '23505') {
+      throw new Error('This UTR has already been submitted. Each transfer can be claimed once.', {
+        cause: error,
+      });
+    }
     console.error(
       'Database query failed in submitManualUpiDepositPending:',
       error
     );
-    throw new Error(error.message || 'Failed to add funds via Owner UPI.', {
+    throw new Error(error.message || 'Failed to submit UPI deposit request.', {
       cause: error,
     });
   }
 }
 
-/**
- * 3B. Owner Admin Panel Approval / Rejection (or Reversal) for Manual UPI Deposits
- */
 export async function reviewManualUpiDepositByOwner(params: {
   adminUid: string;
   adminEmail?: string;
@@ -2318,7 +2337,7 @@ export async function reviewManualUpiDepositByOwner(params: {
     const admin = await getUserProfileByUid(params.adminUid, params.adminEmail);
     const isAdminOwner =
       isOwnerEmail(params.adminEmail) || (admin && isOwnerEmail(admin.email));
-    if (!isAdminOwner && (!admin || admin.role !== 'admin')) {
+    if (!isAdminOwner) {
       throw new Error(
         `Only the Owner (${OWNER_EMAIL}) can approve or reject UPI deposits.`
       );
@@ -2328,7 +2347,8 @@ export async function reviewManualUpiDepositByOwner(params: {
       const txRows = await tx
         .select()
         .from(walletTransactions)
-        .where(eq(walletTransactions.id, params.walletTransactionId));
+        .where(eq(walletTransactions.id, params.walletTransactionId))
+        .for('update');
       const depositTx = txRows[0];
       if (!depositTx || depositTx.type !== 'DEPOSIT') {
         throw new Error('Deposit transaction not found.');
@@ -2337,22 +2357,26 @@ export async function reviewManualUpiDepositByOwner(params: {
       const userRows = await tx
         .select()
         .from(profiles)
-        .where(eq(profiles.id, depositTx.userId));
+        .where(eq(profiles.id, depositTx.userId))
+        .for('update');
       const targetUser = userRows[0];
-      if (!targetUser) {
-        throw new Error('Target user profile not found.');
-      }
-
+      if (!targetUser) throw new Error('Target user profile not found.');
       const normTarget = normalizeUserProfile(targetUser);
 
-      if (params.decision === 'APPROVED') {
-        if (depositTx.status === 'APPROVED' || depositTx.status === 'COMPLETED') {
-          return {
-            walletTransaction: depositTx,
-            updatedUser: normTarget,
-          };
-        }
+      if (
+        (params.decision === 'APPROVED' &&
+          (depositTx.status === 'APPROVED' || depositTx.status === 'COMPLETED')) ||
+        (params.decision === 'REJECTED' && depositTx.status === 'REJECTED')
+      ) {
+        return { walletTransaction: depositTx, updatedUser: normTarget };
+      }
+      if (depositTx.status !== 'PENDING') {
+        throw new Error(
+          `This deposit is already ${depositTx.status}; finalized deposits cannot be changed here.`
+        );
+      }
 
+      if (params.decision === 'APPROVED') {
         const nextWalletInr = Number(
           (normTarget.walletBalanceInr + depositTx.amountInr).toFixed(2)
         );
@@ -2371,7 +2395,7 @@ export async function reviewManualUpiDepositByOwner(params: {
             status: 'APPROVED',
             reviewedBy: admin?.email || OWNER_EMAIL,
             reviewedAt: new Date(),
-            notes: `Approved by Owner · +₹${depositTx.amountInr.toLocaleString(
+            notes: `Approved after owner verified receipt · +₹${depositTx.amountInr.toLocaleString(
               'en-IN'
             )} credited (UTR ${depositTx.utrNumber})`,
           })
@@ -2382,7 +2406,7 @@ export async function reviewManualUpiDepositByOwner(params: {
           userId: targetUser.id,
           type: 'REAL_DEPOSIT_UPI',
           amount: Math.round(depositTx.amountInr),
-          description: `UPI Deposit Approved by Owner: +₹${depositTx.amountInr.toLocaleString(
+          description: `UPI Deposit verified and approved: +₹${depositTx.amountInr.toLocaleString(
             'en-IN'
           )} (UTR ${depositTx.utrNumber})`,
         });
@@ -2391,40 +2415,22 @@ export async function reviewManualUpiDepositByOwner(params: {
           walletTransaction: updatedTxRows[0],
           updatedUser: normalizeUserProfile(updatedUserRows[0]),
         };
-      } else {
-        // If deposit was previously APPROVED, reverse the credited amount from user's wallet
-        let finalUser = normTarget;
-        if (depositTx.status === 'APPROVED' || depositTx.status === 'COMPLETED') {
-          const reversedWalletInr = Number(
-            Math.max(0, normTarget.walletBalanceInr - depositTx.amountInr).toFixed(2)
-          );
-          const updatedUserRows = await tx
-            .update(profiles)
-            .set({
-              walletBalanceInr: reversedWalletInr,
-              realMoneyBalance: Math.round(reversedWalletInr),
-            })
-            .where(eq(profiles.id, targetUser.id))
-            .returning();
-          finalUser = normalizeUserProfile(updatedUserRows[0]);
-        }
-
-        const updatedTxRows = await tx
-          .update(walletTransactions)
-          .set({
-            status: 'REJECTED',
-            reviewedBy: admin?.email || OWNER_EMAIL,
-            reviewedAt: new Date(),
-            notes: `Rejected/Reversed by Owner · UTR ${depositTx.utrNumber}`,
-          })
-          .where(eq(walletTransactions.id, depositTx.id))
-          .returning();
-
-        return {
-          walletTransaction: updatedTxRows[0],
-          updatedUser: finalUser,
-        };
       }
+
+      const updatedTxRows = await tx
+        .update(walletTransactions)
+        .set({
+          status: 'REJECTED',
+          reviewedBy: admin?.email || OWNER_EMAIL,
+          reviewedAt: new Date(),
+          notes: `Rejected after owner review · UTR ${depositTx.utrNumber}. No funds were credited.`,
+        })
+        .where(eq(walletTransactions.id, depositTx.id))
+        .returning();
+      return {
+        walletTransaction: updatedTxRows[0],
+        updatedUser: normTarget,
+      };
     });
   } catch (error: any) {
     console.error(
@@ -2474,7 +2480,8 @@ export async function submitUpiWithdrawalRequest(params: {
       const freshRows = await tx
         .select()
         .from(profiles)
-        .where(eq(profiles.id, user.id));
+        .where(eq(profiles.id, user.id))
+        .for('update');
       const freshUser = normalizeUserProfile(freshRows[0] || user);
 
       if (freshUser.walletBalanceInr < cleanAmount) {
@@ -2551,7 +2558,7 @@ export async function reviewUpiWithdrawalByOwner(params: {
     const admin = await getUserProfileByUid(params.adminUid, params.adminEmail);
     const isAdminOwner =
       isOwnerEmail(params.adminEmail) || (admin && isOwnerEmail(admin.email));
-    if (!isAdminOwner && (!admin || admin.role !== 'admin')) {
+    if (!isAdminOwner) {
       throw new Error(
         `Only the Owner (${OWNER_EMAIL}) can complete or refund withdrawal requests.`
       );
@@ -2561,7 +2568,8 @@ export async function reviewUpiWithdrawalByOwner(params: {
       const txRows = await tx
         .select()
         .from(walletTransactions)
-        .where(eq(walletTransactions.id, params.walletTransactionId));
+        .where(eq(walletTransactions.id, params.walletTransactionId))
+        .for('update');
       const withdrawTx = txRows[0];
       if (!withdrawTx || withdrawTx.type !== 'WITHDRAWAL') {
         throw new Error('Withdrawal request not found.');
@@ -2576,7 +2584,8 @@ export async function reviewUpiWithdrawalByOwner(params: {
       const userRows = await tx
         .select()
         .from(profiles)
-        .where(eq(profiles.id, withdrawTx.userId));
+        .where(eq(profiles.id, withdrawTx.userId))
+        .for('update');
       const targetUser = userRows[0];
       if (!targetUser) {
         throw new Error('Target user profile not found.');
@@ -2584,7 +2593,11 @@ export async function reviewUpiWithdrawalByOwner(params: {
       const normTarget = normalizeUserProfile(targetUser);
 
       if (params.decision === 'COMPLETED') {
-        const cleanUtr = (params.payoutUtrNumber || '').trim() || `UPI-${Date.now().toString().slice(-8)}`;
+        const payoutUtr = validateUtrNumber(String(params.payoutUtrNumber || ''));
+        if (!payoutUtr.valid) {
+          throw new Error(payoutUtr.error || 'Enter the actual 12-digit payout UTR.');
+        }
+        const cleanUtr = payoutUtr.clean;
         const updatedTxRows = await tx
           .update(walletTransactions)
           .set({
@@ -2684,30 +2697,91 @@ export async function verifyAndCreditGatewayPayment(params: {
   paymentId: string;
   signature: string;
 }) {
+  if (process.env.PAYMENT_GATEWAY_ENABLED !== 'true') {
+    throw new Error('Payment gateway deposits are disabled until explicitly configured.');
+  }
+
+  const keyId = process.env.PAYMENT_KEY_ID;
   const secret = process.env.PAYMENT_KEY_SECRET;
-  if (!secret) {
-    throw new Error(
-      'PAYMENT_KEY_SECRET is not configured in .env. Please use the Direct Manual UPI QR + 12-Digit UTR flow.'
-    );
+  if (!keyId || !secret) {
+    throw new Error('Payment gateway credentials are not configured.');
+  }
+  if (
+    !params.orderId ||
+    !params.paymentId ||
+    !/^[a-f0-9]{64}$/i.test(params.signature || '')
+  ) {
+    throw new Error('Invalid payment verification parameters.');
   }
 
   const expectedSignature = crypto
     .createHmac('sha256', secret)
     .update(`${params.orderId}|${params.paymentId}`)
     .digest('hex');
-
-  if (expectedSignature !== params.signature) {
+  const expectedBytes = Buffer.from(expectedSignature, 'hex');
+  const suppliedBytes = Buffer.from(params.signature, 'hex');
+  if (
+    expectedBytes.length !== suppliedBytes.length ||
+    !crypto.timingSafeEqual(expectedBytes, suppliedBytes)
+  ) {
     throw new Error('Cryptographic payment signature verification failed.');
   }
 
   const user = await getUserProfileByUid(params.uid, params.email);
-  if (!user) {
-    throw new Error('User profile not found.');
+  if (!user) throw new Error('User profile not found.');
+  if (!isRealMoneyEligible(user)) {
+    throw new Error('Real Money UPI deposits are invite-only.');
   }
 
-  const cleanAmount = Number(Number(params.amountInr || 0).toFixed(2));
-  if (cleanAmount < 10) {
-    throw new Error('Invalid payment amount.');
+  const amount = calculateUpiDepositSummary(params.amountInr);
+  if (!amount.valid) throw new Error(amount.error || 'Invalid payment amount.');
+
+  const pendingOrderRows = await db
+    .select()
+    .from(walletTransactions)
+    .where(eq(walletTransactions.gatewayOrderId, params.orderId))
+    .limit(2);
+  if (
+    pendingOrderRows.length !== 1 ||
+    pendingOrderRows[0]?.userId !== user.id ||
+    pendingOrderRows[0]?.type !== 'DEPOSIT' ||
+    pendingOrderRows[0]?.status !== 'PENDING' ||
+    Math.round(Number(pendingOrderRows[0]?.amountInr) * 100) !==
+      Math.round(amount.amountInr * 100)
+  ) {
+    throw new Error(
+      'No unique pending INR payment order for this account and amount exists.'
+    );
+  }
+
+  let providerPayment: any;
+  try {
+    const providerResponse = await fetch(
+      `https://api.razorpay.com/v1/payments/${encodeURIComponent(params.paymentId)}`,
+      {
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${keyId}:${secret}`).toString('base64')}`,
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+    if (!providerResponse.ok) {
+      throw new Error('Provider lookup failed');
+    }
+    providerPayment = await providerResponse.json();
+  } catch {
+    throw new Error('Could not confirm the payment with the provider; no funds were credited.');
+  }
+
+  if (
+    providerPayment?.status !== 'captured' ||
+    providerPayment?.captured !== true ||
+    providerPayment?.currency !== 'INR' ||
+    providerPayment?.order_id !== params.orderId ||
+    Number(providerPayment?.amount) !== Math.round(amount.amountInr * 100)
+  ) {
+    throw new Error('Provider payment is not captured for this order and exact INR amount.');
   }
 
   return await db.transaction(async (tx) => {
@@ -2715,17 +2789,37 @@ export async function verifyAndCreditGatewayPayment(params: {
       .select()
       .from(walletTransactions)
       .where(eq(walletTransactions.gatewayPaymentId, params.paymentId));
-    if (existing.length > 0) {
-      throw new Error('Payment ID already credited.');
+    if (existing.length > 0) throw new Error('Payment ID already credited.');
+
+    const lockedOrders = await tx
+      .select()
+      .from(walletTransactions)
+      .where(eq(walletTransactions.gatewayOrderId, params.orderId))
+      .for('update');
+    if (
+      lockedOrders.length !== 1 ||
+      lockedOrders[0].userId !== user.id ||
+      lockedOrders[0].type !== 'DEPOSIT' ||
+      lockedOrders[0].status !== 'PENDING' ||
+      Math.round(Number(lockedOrders[0].amountInr) * 100) !==
+        Math.round(amount.amountInr * 100)
+    ) {
+      throw new Error(
+        'Payment order is missing, already consumed, or does not match this account and amount.'
+      );
     }
 
     const freshRows = await tx
       .select()
       .from(profiles)
-      .where(eq(profiles.id, user.id));
+      .where(eq(profiles.id, user.id))
+      .for('update');
     const freshUser = normalizeUserProfile(freshRows[0] || user);
+    if (!isRealMoneyEligible(freshUser)) {
+      throw new Error('Real Money UPI deposits are invite-only.');
+    }
     const nextWalletInr = Number(
-      (freshUser.walletBalanceInr + cleanAmount).toFixed(2)
+      (freshUser.walletBalanceInr + amount.amountInr).toFixed(2)
     );
 
     const updatedUserRows = await tx
@@ -2738,27 +2832,22 @@ export async function verifyAndCreditGatewayPayment(params: {
       .returning();
 
     const insertedTx = await tx
-      .insert(walletTransactions)
-      .values({
-        userId: user.id,
-        username: user.username,
-        userEmail: user.email,
-        type: 'DEPOSIT',
+      .update(walletTransactions)
+      .set({
         status: 'COMPLETED',
-        amountInr: cleanAmount,
-        gatewayOrderId: params.orderId,
         gatewayPaymentId: params.paymentId,
-        notes: `Verified UPI Gateway Deposit +₹${cleanAmount.toLocaleString(
+        notes: `Provider-verified captured INR deposit +₹${amount.amountInr.toLocaleString(
           'en-IN'
         )} (Order ${params.orderId})`,
       })
+      .where(eq(walletTransactions.id, lockedOrders[0].id))
       .returning();
 
     await tx.insert(transactions).values({
       userId: user.id,
       type: 'REAL_DEPOSIT_UPI',
-      amount: Math.round(cleanAmount),
-      description: `UPI Gateway Verified: +₹${cleanAmount.toLocaleString(
+      amount: Math.round(amount.amountInr),
+      description: `Provider-verified UPI deposit: +₹${amount.amountInr.toLocaleString(
         'en-IN'
       )} (${params.paymentId})`,
     });
