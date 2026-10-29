@@ -54,18 +54,25 @@ export function createInAppToken(payload: AuthUserPayload): string {
   return `inapp.${data}.${sig}`;
 }
 
+function decodeCanonicalBase64Url(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  const decoded = Buffer.from(value, 'base64url');
+  return decoded.toString('base64url') === value ? decoded : null;
+}
+
 export function verifyInAppToken(token: string): AuthUserPayload | null {
   if (!token.startsWith('inapp.')) return null;
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [, data, sig] = parts;
-  if (!/^[A-Za-z0-9_-]+$/.test(sig)) return null;
+  const dataBytes = decodeCanonicalBase64Url(data);
+  const suppliedBytes = decodeCanonicalBase64Url(sig);
+  if (!dataBytes || !suppliedBytes) return null;
 
-  const expectedBytes = Buffer.from(
-    crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url'),
-    'base64url'
-  );
-  const suppliedBytes = Buffer.from(sig, 'base64url');
+  const expectedBytes = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(data)
+    .digest();
   if (
     expectedBytes.length !== suppliedBytes.length ||
     !crypto.timingSafeEqual(expectedBytes, suppliedBytes)
@@ -74,9 +81,7 @@ export function verifyInAppToken(token: string): AuthUserPayload | null {
   }
 
   try {
-    const payload = JSON.parse(
-      Buffer.from(data, 'base64url').toString('utf-8')
-    ) as Partial<AuthUserPayload>;
+    const payload = JSON.parse(dataBytes.toString('utf-8')) as Partial<AuthUserPayload>;
     if (
       typeof payload.uid !== 'string' ||
       !payload.uid ||
