@@ -86,7 +86,7 @@ export default function App() {
     [urlParams]
   );
 
-  // Theme State ('light' Polymarket Daylight default, or 'dark' Midnight)
+  // Theme State (Polymarket-inspired dark market board, with an optional light theme)
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>(() => {
     try {
       const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -94,7 +94,7 @@ export default function App() {
     } catch {
       // ignore storage errors
     }
-    return 'light';
+    return 'dark';
   });
 
   useEffect(() => {
@@ -961,30 +961,38 @@ export default function App() {
   const communityApproved = user ? isCommunityApprovedUser(user) : true;
 
   return (
-    <div className="min-h-screen bg-[#090D16] text-white">
-      {/* Responsive app shell: compact on mobile, spacious on desktop. */}
-      <div className="w-full max-w-[1440px] min-h-screen mx-auto bg-[#090D16] text-white border-x border-slate-800/60 flex flex-col relative pb-24">
-        {/* Sticky Glassmorphism Top Header */}
-        <header className="sticky top-0 z-30 h-14 sm:h-16 px-4 sm:px-6 lg:px-10 bg-[#090D16]/85 backdrop-blur-md border-b border-[#1E293B] flex items-center justify-between gap-2">
-          {/* Zone 1: Brand Wordmark */}
+    <div className="app-root">
+      <div className="app-frame">
+        <header className="app-header">
           <button
             type="button"
             onClick={() => setActiveTab('markets')}
-            className="text-xl font-black font-condensed uppercase tracking-wide text-white whitespace-nowrap shrink-0 flex items-center gap-1"
+            className="app-brand"
+            aria-label="Up and Down home"
           >
-            <span className="text-[#10B981]">UP</span>
-            <span className="text-slate-400">&amp;</span>
-            <span className="text-[#F43F5E]">DOWN</span>
+            <span className="brand-mark"><TrendingUp aria-hidden="true" /></span>
+            <span className="brand-wordmark"><span>UP</span><span className="brand-amp">&amp;</span><span>DOWN</span></span>
           </button>
 
-          {/* Zone 2 & 3: Theme Switcher, Live Coin Balance & Profile/Account Action */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="header-search-wrap">
+            <Search className="header-search-icon" aria-hidden="true" />
+            <input
+              type="search"
+              aria-label="Search markets"
+              placeholder="Search markets, events, or topics"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="header-search-input"
+            />
+          </div>
+
+          <div className="app-header-actions">
             <button
               type="button"
               onClick={handleToggleTheme}
               aria-label={`Switch to ${themeMode === 'light' ? 'dark' : 'light'} theme`}
               data-testid="header-theme-toggle"
-              className="min-h-[36px] min-w-[36px] px-2 rounded-xl bg-[#131B2E] border border-[#1E293B] flex items-center justify-center text-slate-300 hover:text-white transition-colors"
+              className="theme-toggle"
             >
               {themeMode === 'light' ? (
                 <Moon className="w-4 h-4 text-slate-700" />
@@ -1003,7 +1011,7 @@ export default function App() {
                     setIsUpiWalletOpen(true);
                   }}
                   aria-label="Open UPI Real Money Wallet and Bet Calculator"
-                  className="min-h-[36px] px-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/40 flex items-center gap-1 text-xs font-mono-tabular font-bold text-emerald-400 hover:bg-emerald-500/25 transition-colors"
+                  className="header-balance header-balance-real"
                 >
                   <IndianRupee className="w-3.5 h-3.5" />
                   <span data-testid="header-real-money-balance">
@@ -1023,7 +1031,7 @@ export default function App() {
                     setActiveTab('portfolio');
                   }}
                   aria-label="Available virtual coins balance"
-                  className="min-h-[36px] px-2 rounded-xl bg-[#131B2E] border border-[#1E293B] flex items-center gap-1 text-xs font-mono-tabular font-bold text-white hover:border-emerald-500/50 transition-colors"
+                  className="header-balance"
                 >
                   <Coins className="w-3.5 h-3.5 text-amber-400" />
                   <span data-testid="header-coin-balance">
@@ -1038,7 +1046,7 @@ export default function App() {
                     setActiveTab('account');
                   }}
                   aria-label="Open account settings and profile"
-                  className="min-h-[36px] min-w-[36px] px-2 rounded-xl bg-[#131B2E] border border-[#1E293B] flex items-center justify-center gap-1 text-xs font-semibold text-emerald-400 hover:bg-slate-800 transition-colors"
+                  className="header-profile-button"
                 >
                   <User className="w-3.5 h-3.5" />
                   <span className="hidden sm:inline max-w-[60px] truncate">@{user.username}</span>
@@ -1051,17 +1059,70 @@ export default function App() {
                   setAuthError(null);
                   setIsAuthOpen(true);
                 }}
-                className="min-h-[36px] px-3.5 rounded-full poly-blue-pill font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all whitespace-nowrap"
+                className="header-join-button"
               >
                 <Coins className="w-3.5 h-3.5" />
-                <span>Claim 1,000 Coins</span>
+                <span>Join free</span>
               </button>
             )}
           </div>
         </header>
 
-        {/* Main Scrollable Viewport Body */}
-        <main className="flex-1 px-4 sm:px-6 lg:px-10 pt-4 sm:pt-6 pb-8 space-y-4">
+        <div className="app-body">
+          <aside className="desktop-sidebar" aria-label="Workspace navigation">
+            <p className="sidebar-section-label">Discover</p>
+            <nav className="sidebar-nav">
+              <button type="button" onClick={() => handleNavClick('markets')} aria-current={activeTab === 'markets' ? 'page' : undefined} className={`sidebar-nav-link ${activeTab === 'markets' ? 'is-active' : ''}`}>
+                <TrendingUp aria-hidden="true" /><span>Markets</span><span className="nav-count">{markets.length}</span>
+              </button>
+              <button type="button" onClick={() => handleNavClick('leaderboard')} aria-current={activeTab === 'leaderboard' ? 'page' : undefined} className={`sidebar-nav-link ${activeTab === 'leaderboard' ? 'is-active' : ''}`}>
+                <Trophy aria-hidden="true" /><span>Leaderboard</span>
+              </button>
+              <button type="button" onClick={() => handleNavClick('portfolio')} aria-current={activeTab === 'portfolio' ? 'page' : undefined} className={`sidebar-nav-link ${activeTab === 'portfolio' ? 'is-active' : ''}`}>
+                <Briefcase aria-hidden="true" /><span>Portfolio</span>
+              </button>
+              <button type="button" onClick={() => handleNavClick('account')} aria-current={activeTab === 'account' ? 'page' : undefined} className={`sidebar-nav-link ${activeTab === 'account' ? 'is-active' : ''}`}>
+                <User aria-hidden="true" /><span>Account</span>
+              </button>
+            </nav>
+
+            {user ? (
+              <div className="sidebar-account-card">
+                <div className="sidebar-account-heading"><span className="sidebar-avatar">{user.username.slice(0, 1).toUpperCase()}</span><span className="sidebar-user-name">@{user.username}</span></div>
+                <div className="sidebar-account-balance"><Coins aria-hidden="true" /><span>{user.coinBalance.toLocaleString()} Coins</span></div>
+                <button type="button" onClick={() => handleNavClick('portfolio')} className="sidebar-account-link">View portfolio <span aria-hidden="true">→</span></button>
+              </div>
+            ) : (
+              <div className="sidebar-invite-card">
+                <span className="sidebar-invite-icon"><Sparkles aria-hidden="true" /></span>
+                <strong>Make your call</strong>
+                <p>Join your community and start with 1,000 free virtual Coins.</p>
+                <button type="button" onClick={() => { setAuthError(null); setIsAuthOpen(true); }}>Create account</button>
+              </div>
+            )}
+            <p className="sidebar-footnote">A community market for campus, sports &amp; culture.</p>
+          </aside>
+
+        <main className="app-main">
+          {activeTab !== 'markets' && (!user || communityApproved) && (
+            <section className="workspace-page-heading">
+              <p className="workspace-page-kicker">UP &amp; DOWN <span>/</span> WORKSPACE</p>
+              <h1>
+                {activeTab === 'leaderboard'
+                  ? 'Community leaderboard'
+                  : activeTab === 'portfolio'
+                  ? 'Your portfolio'
+                  : 'Account & creator studio'}
+              </h1>
+              <p>
+                {activeTab === 'leaderboard'
+                  ? 'See how your calls stack up across predictors and campuses.'
+                  : activeTab === 'portfolio'
+                  ? 'Track your positions, balances and recent activity in one place.'
+                  : 'Manage your profile, community access and market tools.'}
+              </p>
+            </section>
+          )}
           {/* STRICT RBAC GATE: INVITE-ONLY / WAITING FOR OWNER APPROVAL SCREEN */}
           {user && !communityApproved ? (
             <div
@@ -1204,27 +1265,18 @@ export default function App() {
 
               {/* TAB 1: MARKETS FEED */}
               {activeTab === 'markets' && (
-                <div className="space-y-3.5">
-                  {/* Polymarket Play Store Inspired Hero Header Banner */}
-                  <div className="bg-gradient-to-br from-[#131B2E] to-[#0D1424] border border-[#1E293B] rounded-2xl sm:rounded-3xl p-5 sm:p-7">
-                    <p className="text-[11px] font-extrabold tracking-wider uppercase text-sky-400 mb-0.5">
-                      SPORTS, CAMPUS, CREATORS, TECH &amp; MORE
-                    </p>
-                    <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black font-condensed uppercase tracking-tight text-white leading-none">
-                      MARKETS ON EVERYTHING
-                    </h1>
-                    <p className="text-sm sm:text-base text-slate-400 mt-2.5 leading-relaxed max-w-3xl">
-                      Every event trades on a{' '}
-                      <strong className="text-slate-200">
-                        ₹100 Base (YES + NO = ₹100)
-                      </strong>
-                      . Buy fractional or whole shares and sell early anytime to
-                      book profit.
-                    </p>
-                  </div>
+                <div className="market-page">
+                  <section className="market-hero">
+                    <div className="market-hero-copy">
+                      <p className="market-kicker"><span className="market-live-dot" /> THE COMMUNITY PREDICTION MARKET</p>
+                      <h1>What happens next?</h1>
+                      <p className="market-hero-description">Trade your take on campus, sports, creators and culture. Follow the crowd, find your edge, and watch the odds move.</p>
+                      <div className="market-hero-details"><span>YES + NO shares</span><span>Virtual Coins to get started</span><span>Sell before resolution</span></div>
+                    </div>
+                    {!user && <button type="button" className="market-hero-cta" onClick={() => { setAuthError(null); setIsAuthOpen(true); }}>Get 1,000 free Coins <span aria-hidden="true">→</span></button>}
+                  </section>
 
-                  {/* Search Bar */}
-                  <div className="relative">
+                  <div className="market-search-wrap">
                     <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5" />
                     <input
                       type="search"
@@ -1232,13 +1284,13 @@ export default function App() {
                       placeholder="Search IPL, Mood Indigo, GTA 6, Exams, F1..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="w-full min-h-[46px] pl-10 pr-4 rounded-xl bg-[#131B2E] border border-[#1E293B] text-sm text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
+                      className="market-search-input w-full min-h-[46px] pl-10 pr-4 rounded-xl bg-[#131B2E] border border-[#1E293B] text-sm text-white placeholder-slate-500 focus:outline-none focus:border-slate-600"
                     />
                   </div>
 
                   {/* Interactive Category Filter Controls */}
                   <div
-                    className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1"
+                    className="market-category-tabs flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1"
                     role="tablist"
                     aria-label="Market categories"
                   >
@@ -1284,7 +1336,7 @@ export default function App() {
                       </p>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 lg:gap-5">
+                    <div className="market-grid grid grid-cols-1 md:grid-cols-2 gap-3.5 lg:gap-5">
                       {filteredMarkets.map((market) => (
                         <MarketCard
                           key={market.id}
@@ -1408,10 +1460,41 @@ export default function App() {
           )}
         </main>
 
+          {activeTab === 'markets' && (!user || communityApproved) && (
+            <aside className="market-right-rail" aria-label="Market overview">
+              <section className="rail-card market-pulse-card">
+                <div className="rail-card-heading"><div><p className="rail-eyebrow">MARKET SNAPSHOT</p><h2>Market pulse</h2></div><TrendingUp aria-hidden="true" /></div>
+                <div className="market-pulse-stats">
+                  <div><span>Open markets</span><strong>{markets.filter((market) => market.status === 'open').length}</strong></div>
+                  <div><span>Total volume</span><strong>{markets.reduce((sum, market) => sum + Number(market.totalVolume || 0), 0).toLocaleString('en-IN')} <small>Coins</small></strong></div>
+                </div>
+              </section>
+
+              <section className="rail-card rail-trending-card">
+                <div className="rail-card-heading"><div><p className="rail-eyebrow">BY COMMUNITY VOLUME</p><h2>Trending markets</h2></div><TrendingUp aria-hidden="true" /></div>
+                {markets.length ? (
+                  <div className="trending-market-list">
+                    {[...markets].sort((a, b) => Number(b.totalVolume || 0) - Number(a.totalVolume || 0)).slice(0, 5).map((market) => {
+                      const { yesPrice } = calculateMarketPrices(market.yesPool, market.noPool);
+                      return <button type="button" className="trending-market-row" key={market.id} onClick={() => { setSelectedMarket(market); setSelectedSide('YES'); setTradeError(null); }}><span className="trending-market-copy"><span className="trending-market-category">{market.category}</span><strong>{market.title}</strong></span><span className="trending-market-odds">{yesPrice}% <small>YES</small></span></button>;
+                    })}
+                  </div>
+                ) : <p className="rail-empty-state">Markets will appear here when available.</p>}
+              </section>
+
+              {!user ? (
+                <section className="rail-card rail-join-card"><p className="rail-eyebrow">YOUR NEXT GOOD CALL</p><h2>Make your prediction count.</h2><p>Create a free account to trade virtual Coins and track your portfolio.</p><button type="button" onClick={() => { setAuthError(null); setIsAuthOpen(true); }}>Join the market <span aria-hidden="true">→</span></button></section>
+              ) : (
+                <section className="rail-card rail-account-card"><p className="rail-eyebrow">YOUR ACCOUNT</p><div className="rail-account-balance"><span>Virtual balance</span><strong><Coins aria-hidden="true" /> {user.coinBalance.toLocaleString()} <small>Coins</small></strong></div><button type="button" onClick={() => handleNavClick('portfolio')}>Open portfolio <span aria-hidden="true">→</span></button></section>
+              )}
+            </aside>
+          )}
+        </div>
+
         {/* Sticky Bottom Navigation Bar (Markets, Leaderboard, Portfolio, Account) */}
         <nav
           aria-label="Primary bottom navigation"
-          className="fixed bottom-0 sm:bottom-5 left-1/2 -translate-x-1/2 w-full max-w-[430px] sm:max-w-[640px] h-16 bg-[#090D16]/95 backdrop-blur-md border-t border-x sm:border border-[#1E293B] rounded-t-2xl sm:rounded-2xl grid grid-cols-4 items-center z-30 px-2 shadow-2xl"
+          className="mobile-bottom-nav fixed bottom-0 sm:bottom-5 w-full max-w-[430px] sm:max-w-[640px] h-16 bg-[#090D16]/95 backdrop-blur-md border-t border-x sm:border border-[#1E293B] rounded-t-2xl sm:rounded-2xl grid grid-cols-4 items-center z-30 px-2 shadow-2xl"
         >
           <button
             type="button"

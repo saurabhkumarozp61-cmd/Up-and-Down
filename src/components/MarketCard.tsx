@@ -35,7 +35,7 @@ export const MarketCard: React.FC<MarketCardProps> = ({
   return (
     <article
       data-testid={`market-card-${market.id}`}
-      className="bg-[#131B2E] border border-[#1E293B] rounded-2xl sm:rounded-3xl p-4 sm:p-5 transition-all hover:border-slate-700/80 hover:shadow-lg hover:shadow-black/10"
+      className="market-card bg-[#131B2E] border border-[#1E293B] rounded-2xl sm:rounded-3xl p-4 sm:p-5 transition-all hover:border-slate-700/80 hover:shadow-lg hover:shadow-black/10"
     >
       {/* Top Unboxed Metadata Row (Zero-Pill Discipline) */}
       <div className="flex items-center justify-between gap-2 text-xs text-slate-400 mb-2">
