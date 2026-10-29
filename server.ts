@@ -1,33 +1,55 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import {
-  AuthRequest,
+  type AuthRequest,
   createInAppToken,
   requireAuth,
 } from './src/middleware/auth.ts';
 import {
   claimDailyRefillCoins,
+  createInAppInviteCodeByOwner,
   createMarketByCreatorOrAdmin,
   getAllMarkets,
   getAllProfilesWithPositions,
+  getAllWalletTransactionsForAdmin,
+  getInAppInviteCodes,
+  getOwnerMainUpiConfig,
   getUserPortfolio,
   getUserProfileByEmailOrUsername,
   getUserProfileByUid,
   placeTradeAtomic,
+  redeemOwnerInviteCode,
   registerOrSyncUser,
+  requestCreatorAccess,
   resolveMarketAtomic,
-  selfSwitchDemoRole,
+  reviewManualUpiDepositByOwner,
+  reviewUpiWithdrawalByOwner,
+  sellPositionEarlyAtomic,
+  submitManualUpiDepositPending,
+  submitRealMoneyInviteRequest,
+  submitUpiWithdrawalRequest,
+  updateGranularPermissionsByOwner,
+  updateOwnerMainUpiByOwner,
+  updateRealMoneyStatusByOwner,
   updateRoleByIdentifier,
+  updateUserProfile,
+  verifyAndCreditGatewayPayment,
 } from './src/db/repository.ts';
+import {
+  DEFAULT_OWNER_INVITE_CODE,
+  DEFAULT_OWNER_UPI_ID,
+  DEFAULT_OWNER_UPI_NAME,
+  isOwnerEmail,
+} from './src/utils/marketMath.ts';
 
 dotenv.config();
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json());
 
@@ -36,7 +58,7 @@ async function startServer() {
     res.json({ status: 'ok', app: 'Up & Down' });
   });
 
-  // 1. Public: Get all markets (Zero Sign-In Wall)
+  // 1. Public: Get all markets
   app.get('/api/markets', async (_req, res) => {
     try {
       const allMarkets = await getAllMarkets();
@@ -47,11 +69,28 @@ async function startServer() {
     }
   });
 
-  // 2. Public: Get Leaderboard data (Top Predictors & College Wars)
+  // 2. Public: Get Leaderboard data, Owner Main UPI config, & In-App Invite Codes
   app.get('/api/leaderboard', async (_req, res) => {
     try {
-      const predictors = await getAllProfilesWithPositions();
-      res.json({ predictors });
+      const [predictors, adminWalletTransactions, ownerUpiCfg] =
+        await Promise.all([
+          getAllProfilesWithPositions(),
+          getAllWalletTransactionsForAdmin(),
+          getOwnerMainUpiConfig(),
+        ]);
+      res.json({
+        predictors,
+        adminWalletTransactions,
+        inAppInviteCodes: getInAppInviteCodes(),
+        upiConfig: {
+          ownerUpiId: ownerUpiCfg.ownerUpiId || DEFAULT_OWNER_UPI_ID,
+          ownerUpiName: ownerUpiCfg.ownerUpiName || DEFAULT_OWNER_UPI_NAME,
+          gatewayEnabled: Boolean(
+            process.env.PAYMENT_KEY_ID && process.env.PAYMENT_KEY_SECRET
+          ),
+          paymentKeyId: process.env.PAYMENT_KEY_ID || '',
+        },
+      });
     } catch (error: any) {
       console.error('Failed to fetch leaderboard:', error);
       res.status(500).json({ error: error.message || 'Failed to fetch leaderboard' });
@@ -73,36 +112,69 @@ async function startServer() {
   // 4. In-App Browser Proof Auth: Email + Password Sign-Up
   app.post('/api/auth/signup', async (req, res) => {
     try {
-      const { email, password, username, collegeName, referredBy } = req.body || {};
+      const {
+        email,
+        password,
+        username,
+        collegeName,
+        referredBy,
+        inviteCode,
+        requestCreatorInvite,
+      } = req.body || {};
       if (!email || !username || !password || !collegeName) {
         return res.status(400).json({
-          error: 'Please fill in Username, College, Email, and Password.',
+          error: 'Please fill in User ID, College, Email, and Password.',
         });
       }
 
       const existing = await getUserProfileByEmailOrUsername(email);
-      if (existing) {
+      const isPreapprovedEmail =
+        existing &&
+        (existing.uid === 'owner-saurabh' ||
+          existing.uid.startsWith('preapproved-'));
+      if (existing && !isPreapprovedEmail) {
         return res.status(400).json({
           error: 'An account with this email already exists. Please log in instead.',
         });
       }
 
       const existingUser = await getUserProfileByEmailOrUsername(username);
-      if (existingUser) {
+      const isPreapprovedUsername =
+        existingUser &&
+        (existingUser.uid.startsWith('preapproved-') ||
+          (existing && existingUser.id === existing.id));
+      if (existingUser && !isPreapprovedUsername) {
         return res.status(400).json({
-          error: 'That username is already taken. Try another handle!',
+          error: 'That User ID (@username) is already taken. Try another handle!',
         });
       }
 
-      const uid = `inapp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const profile = await registerOrSyncUser({
+      const uid = `inapp-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      let profile = await registerOrSyncUser({
         uid,
         email,
         username,
         passwordHash: password,
         collegeName,
         referredBy,
+        inviteCode,
+        requestCreatorInvite: Boolean(requestCreatorInvite),
       });
+
+      if (username && username.trim()) {
+        try {
+          profile = await updateUserProfile({
+            uid: profile.uid,
+            email: profile.email,
+            username: username.trim(),
+            collegeName,
+          });
+        } catch {
+          // Keep existing username if conflict
+        }
+      }
 
       const token = createInAppToken({
         uid: profile.uid,
@@ -116,6 +188,7 @@ async function startServer() {
         token,
         positions: portfolio.positions,
         transactions: portfolio.transactions,
+        walletTransactions: portfolio.walletTransactions,
       });
     } catch (error: any) {
       console.error('Signup error:', error);
@@ -123,28 +196,48 @@ async function startServer() {
     }
   });
 
-  // 5. In-App Browser Proof Auth: Email / Username + Password Login (or Demo Quick Login)
+  // 5. In-App Browser Proof Auth: Email / Username + Password Login
   app.post('/api/auth/login', async (req, res) => {
     try {
-      const { identifier, password, isDemoQuickLogin } = req.body || {};
+      const {
+        identifier,
+        password,
+        isDemoQuickLogin,
+        requestCreatorInvite,
+      } = req.body || {};
       if (!identifier) {
-        return res.status(400).json({ error: 'Please enter your email or username.' });
+        return res
+          .status(400)
+          .json({ error: 'Please enter your email or User ID.' });
       }
 
-      const profile = await getUserProfileByEmailOrUsername(identifier);
+      let profile = await getUserProfileByEmailOrUsername(identifier);
       if (!profile) {
         return res.status(404).json({
-          error: 'No account found with that email or username. Sign up to claim 1,000 Free Coins!',
+          error:
+            'No account found with that email or User ID. Sign up to create your account!',
         });
       }
 
       if (
         !isDemoQuickLogin &&
         password &&
+        profile.uid !== 'owner-saurabh' &&
+        !profile.uid.startsWith('preapproved-') &&
         profile.passwordHash !== password &&
         profile.passwordHash !== 'demo_pass'
       ) {
-        return res.status(401).json({ error: 'Incorrect password. Please try again.' });
+        return res
+          .status(401)
+          .json({ error: 'Incorrect password. Please try again.' });
+      }
+
+      if (requestCreatorInvite && profile.role === 'user') {
+        try {
+          profile = await requestCreatorAccess(profile.uid, profile.email);
+        } catch {
+          // Keep existing profile if update fails
+        }
       }
 
       const token = createInAppToken({
@@ -159,6 +252,7 @@ async function startServer() {
         token,
         positions: portfolio.positions,
         transactions: portfolio.transactions,
+        walletTransactions: portfolio.walletTransactions,
       });
     } catch (error: any) {
       console.error('Login error:', error);
@@ -167,39 +261,76 @@ async function startServer() {
   });
 
   // 6. Firebase Google Sign-In Sync
-  app.post('/api/auth/firebase-sync', requireAuth, async (req: AuthRequest, res) => {
-    try {
-      if (!req.user) {
-        return res.status(401).json({ error: 'Unauthorized' });
+  app.post(
+    '/api/auth/firebase-sync',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const {
+          collegeName,
+          referredBy,
+          inviteCode,
+          username,
+          customUsername,
+          requestCreatorInvite,
+        } = req.body || {};
+        const preferredUsername =
+          (customUsername && customUsername.trim()) ||
+          (username && username.trim()) ||
+          req.user.username ||
+          req.user.email.split('@')[0] ||
+          `campus_${req.user.uid.slice(0, 6)}`;
+
+        let profile = await registerOrSyncUser({
+          uid: req.user.uid,
+          email: req.user.email,
+          username: preferredUsername,
+          collegeName: collegeName || 'IIT Bombay',
+          referredBy,
+          inviteCode,
+          requestCreatorInvite: Boolean(requestCreatorInvite),
+        });
+
+        if (customUsername && customUsername.trim()) {
+          try {
+            profile = await updateUserProfile({
+              uid: profile.uid,
+              email: profile.email,
+              username: customUsername.trim(),
+              collegeName: collegeName || profile.collegeName,
+            });
+          } catch {
+            // Keep existing username if customUsername had a conflict
+          }
+        }
+
+        const token = createInAppToken({
+          uid: profile.uid,
+          email: profile.email,
+          username: profile.username,
+        });
+
+        const portfolio = await getUserPortfolio(profile.id);
+        res.json({
+          user: profile,
+          token,
+          positions: portfolio.positions,
+          transactions: portfolio.transactions,
+          walletTransactions: portfolio.walletTransactions,
+        });
+      } catch (error: any) {
+        console.error('Firebase sync error:', error);
+        res
+          .status(500)
+          .json({ error: error.message || 'Failed to sync user profile' });
       }
-      const { collegeName, referredBy, username } = req.body || {};
-      const derivedUsername =
-        username ||
-        req.user.username ||
-        req.user.email.split('@')[0] ||
-        `campus_${req.user.uid.slice(0, 6)}`;
-
-      const profile = await registerOrSyncUser({
-        uid: req.user.uid,
-        email: req.user.email,
-        username: derivedUsername,
-        collegeName: collegeName || 'IIT Bombay',
-        referredBy,
-      });
-
-      const portfolio = await getUserPortfolio(profile.id);
-      res.json({
-        user: profile,
-        positions: portfolio.positions,
-        transactions: portfolio.transactions,
-      });
-    } catch (error: any) {
-      console.error('Firebase sync error:', error);
-      res.status(500).json({ error: error.message || 'Failed to sync user profile' });
     }
-  });
+  );
 
-  // 7. Authenticated User Profile + Portfolio + Transactions
+  // 7. Authenticated User Profile + Portfolio + Transactions + Wallet Ledger
   app.get('/api/me', requireAuth, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
@@ -209,11 +340,30 @@ async function startServer() {
       if (!profile) {
         return res.status(404).json({ error: 'Profile not found' });
       }
-      const portfolio = await getUserPortfolio(profile.id);
+      const token = createInAppToken({
+        uid: profile.uid,
+        email: profile.email,
+        username: profile.username,
+      });
+      const isAdmin =
+        isOwnerEmail(profile.email) || profile.role === 'admin';
+      const [portfolio, adminWalletTransactions, ownerUpiConfig] =
+        await Promise.all([
+          getUserPortfolio(profile.id),
+          isAdmin ? getAllWalletTransactionsForAdmin() : Promise.resolve([]),
+          getOwnerMainUpiConfig(),
+        ]);
+
       res.json({
         user: profile,
+        token,
         positions: portfolio.positions,
         transactions: portfolio.transactions,
+        walletTransactions: portfolio.walletTransactions,
+        adminWalletTransactions,
+        ownerUpiId: ownerUpiConfig.ownerUpiId,
+        ownerUpiName: ownerUpiConfig.ownerUpiName,
+        inviteCodes: getInAppInviteCodes(),
       });
     } catch (error: any) {
       console.error('Failed to load /api/me:', error);
@@ -221,13 +371,83 @@ async function startServer() {
     }
   });
 
-  // 8. Place Trade (Atomic balance deduction, pool shift & share creation)
+  // 7b. Update Custom User ID (@username) and College Name
+  app.put('/api/profile', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      const { username, collegeName } = req.body || {};
+      if (!username || !String(username).trim()) {
+        return res
+          .status(400)
+          .json({ error: 'Please enter a valid User ID (@username).' });
+      }
+
+      const updatedUser = await updateUserProfile({
+        uid: req.user.uid,
+        email: req.user.email,
+        username: String(username),
+        collegeName: collegeName ? String(collegeName) : undefined,
+      });
+
+      const token = createInAppToken({
+        uid: updatedUser.uid,
+        email: updatedUser.email,
+        username: updatedUser.username,
+      });
+
+      const predictors = await getAllProfilesWithPositions();
+      res.json({
+        user: updatedUser,
+        token,
+        predictors,
+      });
+    } catch (error: any) {
+      console.error('Profile update error:', error);
+      res
+        .status(400)
+        .json({ error: error.message || 'Failed to update User ID' });
+    }
+  });
+
+  // 7c. Redeem Owner Invite Code (Unlocks `is_community_approved` + `has_payment_and_trading_access`)
+  app.post(
+    '/api/account/redeem-invite',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { inviteCode } = req.body || {};
+        const updatedUser = await redeemOwnerInviteCode({
+          uid: req.user.uid,
+          email: req.user.email,
+          inviteCode: String(inviteCode || ''),
+        });
+        const predictors = await getAllProfilesWithPositions();
+        res.json({
+          user: updatedUser,
+          predictors,
+          inAppInviteCodes: getInAppInviteCodes(),
+        });
+      } catch (error: any) {
+        console.error('Invite code redeem error:', error);
+        res
+          .status(400)
+          .json({ error: error.message || 'Invalid Owner Invite Code' });
+      }
+    }
+  );
+
+  // 8. Place Trade (₹100 Base Fractional & Whole Shares Buy)
   app.post('/api/trade', requireAuth, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
-      const { marketId, side, amount } = req.body || {};
+      const { marketId, side, amount, walletType } = req.body || {};
       if (!marketId || (side !== 'YES' && side !== 'NO') || !amount) {
         return res.status(400).json({ error: 'Invalid trade parameters' });
       }
@@ -238,18 +458,20 @@ async function startServer() {
         marketId: Number(marketId),
         side,
         amount: Number(amount),
+        walletType: walletType === 'REAL_INR' ? 'REAL_INR' : 'COINS',
       });
 
       const profile = await getUserProfileByUid(req.user.uid, req.user.email);
       const portfolio = profile
         ? await getUserPortfolio(profile.id)
-        : { positions: [], transactions: [] };
+        : { positions: [], transactions: [], walletTransactions: [] };
 
       res.json({
         ...result,
         user: profile,
         positions: portfolio.positions,
         transactions: portfolio.transactions,
+        walletTransactions: portfolio.walletTransactions,
       });
     } catch (error: any) {
       console.error('Trade error:', error);
@@ -257,33 +479,118 @@ async function startServer() {
     }
   });
 
-  // 9. Claim Daily 100 Coin Vault Refill Drop
+  // 8b. Early Exit (Sell Before Final Result / Profit Booking & Stop-Loss)
+  app.post('/api/trade/sell', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      const { positionId, sharesToSell } = req.body || {};
+      if (!positionId) {
+        return res.status(400).json({ error: 'Valid positionId is required' });
+      }
+
+      const result = await sellPositionEarlyAtomic({
+        uid: req.user.uid,
+        email: req.user.email,
+        positionId: Number(positionId),
+        sharesToSell:
+          sharesToSell !== undefined && Number(sharesToSell) > 0
+            ? Number(sharesToSell)
+            : undefined,
+      });
+
+      const [profile, allMarkets, predictors] = await Promise.all([
+        getUserProfileByUid(req.user.uid, req.user.email),
+        getAllMarkets(),
+        getAllProfilesWithPositions(),
+      ]);
+      const portfolio = profile
+        ? await getUserPortfolio(profile.id)
+        : { positions: [], transactions: [], walletTransactions: [] };
+
+      res.json({
+        ...result,
+        user: profile,
+        markets: allMarkets,
+        predictors,
+        positions: portfolio.positions,
+        transactions: portfolio.transactions,
+        walletTransactions: portfolio.walletTransactions,
+      });
+    } catch (error: any) {
+      console.error('Early exit sell error:', error);
+      res
+        .status(400)
+        .json({ error: error.message || 'Failed to execute early exit sell' });
+    }
+  });
+
+  // 9. Claim Daily 100 Coin Vault Refill Drop (Strictly 1x per 24 hours)
   app.post('/api/vault/refill', requireAuth, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
-      const updatedUser = await claimDailyRefillCoins(req.user.uid, req.user.email);
+      const updatedUser = await claimDailyRefillCoins(
+        req.user.uid,
+        req.user.email
+      );
       const portfolio = await getUserPortfolio(updatedUser.id);
       res.json({
         user: updatedUser,
         positions: portfolio.positions,
         transactions: portfolio.transactions,
+        walletTransactions: portfolio.walletTransactions,
       });
     } catch (error: any) {
       console.error('Refill error:', error);
-      res.status(400).json({ error: error.message || 'Failed to claim vault refill' });
+      res
+        .status(400)
+        .json({ error: error.message || 'Failed to claim vault refill' });
     }
   });
 
-  // 10. Create New Market (Admin & Verified Community Creators Only)
+  // 9b. Request Creator / Event Host Access (via Owner Invite Link or Account Hub)
+  app.post(
+    '/api/account/request-access',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const updatedUser = await requestCreatorAccess(
+          req.user.uid,
+          req.user.email
+        );
+        const predictors = await getAllProfilesWithPositions();
+        res.json({
+          user: updatedUser,
+          predictors,
+        });
+      } catch (error: any) {
+        console.error('Request creator access error:', error);
+        res.status(400).json({
+          error: error.message || 'Failed to request creator access',
+        });
+      }
+    }
+  );
+
+  // 10. Create New Market (Owner & `can_create_events` Approved Users Only)
   app.post('/api/admin/markets', requireAuth, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
-      const { title, category, closesAt, startingYesProbability, resolutionRules } =
-        req.body || {};
+      const {
+        title,
+        category,
+        closesAt,
+        startingYesProbability,
+        resolutionRules,
+      } = req.body || {};
       if (!title || !category || !closesAt) {
         return res.status(400).json({
           error: 'Title, category, and closing date are required.',
@@ -304,11 +611,13 @@ async function startServer() {
       res.json({ market: created, markets: allMarkets });
     } catch (error: any) {
       console.error('Create market error:', error);
-      res.status(403).json({ error: error.message || 'Failed to create market' });
+      res
+        .status(403)
+        .json({ error: error.message || 'Failed to create market' });
     }
   });
 
-  // 11. Resolve or Cancel Market (Admin Only)
+  // 11. Resolve or Cancel Market (Owner & Admin Only - ₹100 per winning share settlement)
   app.post('/api/admin/resolve', requireAuth, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
@@ -328,33 +637,94 @@ async function startServer() {
         resolution,
       });
 
-      const allMarkets = await getAllMarkets();
-      const profile = await getUserProfileByUid(req.user.uid, req.user.email);
+      const [allMarkets, predictors, profile] = await Promise.all([
+        getAllMarkets(),
+        getAllProfilesWithPositions(),
+        getUserProfileByUid(req.user.uid, req.user.email),
+      ]);
       const portfolio = profile
         ? await getUserPortfolio(profile.id)
-        : { positions: [], transactions: [] };
+        : { positions: [], transactions: [], walletTransactions: [] };
 
       res.json({
         ...result,
         markets: allMarkets,
+        predictors,
         user: profile,
         positions: portfolio.positions,
         transactions: portfolio.transactions,
+        walletTransactions: portfolio.walletTransactions,
       });
     } catch (error: any) {
       console.error('Resolve market error:', error);
-      res.status(403).json({ error: error.message || 'Failed to resolve market' });
+      res
+        .status(403)
+        .json({ error: error.message || 'Failed to resolve market' });
     }
   });
 
-  // 12. Promote User Role (Admin Only - Community Creator Manager)
+  // 12. Granular Owner RBAC Permissions & User Invite Endpoint
+  app.post(
+    '/api/admin/permissions',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const {
+          targetIdentifier,
+          isCommunityApproved,
+          canCreateEvents,
+          hasPaymentAndTradingAccess,
+          newRole,
+        } = req.body || {};
+
+        if (!targetIdentifier) {
+          return res.status(400).json({
+            error: 'Please enter a valid @username, email, or user ID.',
+          });
+        }
+
+        const updatedTarget = await updateGranularPermissionsByOwner({
+          adminUid: req.user.uid,
+          adminEmail: req.user.email,
+          targetIdentifier: String(targetIdentifier),
+          isCommunityApproved:
+            typeof isCommunityApproved === 'boolean'
+              ? isCommunityApproved
+              : undefined,
+          canCreateEvents:
+            typeof canCreateEvents === 'boolean' ? canCreateEvents : undefined,
+          hasPaymentAndTradingAccess:
+            typeof hasPaymentAndTradingAccess === 'boolean'
+              ? hasPaymentAndTradingAccess
+              : undefined,
+          newRole,
+        });
+
+        const predictors = await getAllProfilesWithPositions();
+        res.json({ updatedProfile: updatedTarget, predictors });
+      } catch (error: any) {
+        console.error('Granular permissions update error:', error);
+        res.status(403).json({
+          error: error.message || 'Failed to update granular permissions',
+        });
+      }
+    }
+  );
+
+  // 12b. Legacy Promote User Role Endpoint (Mapped to Granular RBAC)
   app.post('/api/admin/promote', requireAuth, async (req: AuthRequest, res) => {
     try {
       if (!req.user) {
         return res.status(401).json({ error: 'Unauthorized' });
       }
       const { targetIdentifier, newRole } = req.body || {};
-      if (!targetIdentifier || !['user', 'creator', 'admin'].includes(newRole)) {
+      if (
+        !targetIdentifier ||
+        !['user', 'pending_creator', 'creator', 'admin'].includes(newRole)
+      ) {
         return res.status(400).json({
           error: 'Valid username/email and target role required.',
         });
@@ -371,36 +741,462 @@ async function startServer() {
       res.json({ updatedProfile: updatedTarget, predictors });
     } catch (error: any) {
       console.error('Promote user error:', error);
-      res.status(400).json({ error: error.message || 'Failed to update role' });
+      res.status(403).json({ error: error.message || 'Failed to update role' });
     }
   });
 
-  // 13. Demo Role Switcher (For testing User / Creator / Admin Studio flows seamlessly)
-  app.post('/api/demo/role', requireAuth, async (req: AuthRequest, res) => {
+  // 13. Submit Invite-Only Application for Real Money (₹ UPI) Wallet & Betting
+  app.post(
+    '/api/wallet/upi-invite',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { fullName, upiId, phone, inviteNote } = req.body || {};
+        const updatedUser = await submitRealMoneyInviteRequest({
+          uid: req.user.uid,
+          email: req.user.email,
+          fullName: String(fullName || ''),
+          upiId: String(upiId || ''),
+          phone: String(phone || ''),
+          inviteNote: inviteNote ? String(inviteNote) : undefined,
+        });
+
+        const predictors = await getAllProfilesWithPositions();
+        res.json({ user: updatedUser, predictors });
+      } catch (error: any) {
+        console.error('Real money invite request error:', error);
+        res.status(400).json({
+          error:
+            error.message || 'Failed to submit Real Money invite application',
+        });
+      }
+    }
+  );
+
+  // 14. Owner Approves / Revokes Real Money (₹ UPI) Wallet & Betting Access
+  app.post(
+    '/api/admin/real-money-approve',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { targetIdentifier, status } = req.body || {};
+        if (
+          !targetIdentifier ||
+          !['none', 'pending', 'approved', 'rejected'].includes(status)
+        ) {
+          return res.status(400).json({
+            error: 'Valid username/email and status required.',
+          });
+        }
+
+        const updatedTarget = await updateRealMoneyStatusByOwner({
+          adminUid: req.user.uid,
+          adminEmail: req.user.email,
+          targetIdentifier: String(targetIdentifier),
+          status,
+        });
+
+        const predictors = await getAllProfilesWithPositions();
+        res.json({ updatedProfile: updatedTarget, predictors });
+      } catch (error: any) {
+        console.error('Real money approval error:', error);
+        res.status(403).json({
+          error: error.message || 'Failed to update Real Money UPI status',
+        });
+      }
+    }
+  );
+
+  // 14b. Owner Generates Self-Contained In-App Invite Code
+  app.post(
+    '/api/admin/invite-codes',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const {
+          customCode,
+          code,
+          label,
+          isCommunityApproved,
+          canCreateEvents,
+          hasPaymentAndTradingAccess,
+        } = req.body || {};
+
+        const codes = await createInAppInviteCodeByOwner({
+          adminUid: req.user.uid,
+          adminEmail: req.user.email,
+          customCode:
+            customCode || code ? String(customCode || code) : undefined,
+          label: label ? String(label) : undefined,
+          isCommunityApproved:
+            typeof isCommunityApproved === 'boolean'
+              ? isCommunityApproved
+              : true,
+          canCreateEvents: Boolean(canCreateEvents),
+          hasPaymentAndTradingAccess:
+            typeof hasPaymentAndTradingAccess === 'boolean'
+              ? hasPaymentAndTradingAccess
+              : true,
+        });
+
+        res.json({ inAppInviteCodes: codes });
+      } catch (error: any) {
+        console.error('Create invite code error:', error);
+        res.status(403).json({
+          error: error.message || 'Failed to generate in-app invite code',
+        });
+      }
+    }
+  );
+
+  // 14c. Owner Updates Main Receiving UPI ID
+  app.post(
+    '/api/admin/owner-upi',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { newOwnerUpiId, ownerUpiId } = req.body || {};
+        const updatedUpi = await updateOwnerMainUpiByOwner({
+          adminUid: req.user.uid,
+          adminEmail: req.user.email,
+          newOwnerUpiId: String(newOwnerUpiId || ownerUpiId || ''),
+        });
+        res.json({
+          upiConfig: updatedUpi,
+          ownerUpiId: updatedUpi.ownerUpiId,
+          ownerUpiName: updatedUpi.ownerUpiName,
+        });
+      } catch (error: any) {
+        console.error('Update owner UPI error:', error);
+        res.status(403).json({
+          error: error.message || 'Failed to update Owner Main UPI ID',
+        });
+      }
+    }
+  );
+
+  // 15. Direct Owner UPI Deposit (Payment goes to Owner's UPI ID -> Immediately credits exact amount to user's live wallet so they can buy/sell YES/NO)
+  app.post(
+    '/api/wallet/upi-deposit',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { amountInr, utrNumber, upiId, paymentApp } = req.body || {};
+        const result = await submitManualUpiDepositPending({
+          uid: req.user.uid,
+          email: req.user.email,
+          amountInr: Number(amountInr),
+          utrNumber: String(utrNumber || ''),
+          senderUpiId: upiId ? String(upiId) : undefined,
+          paymentApp: paymentApp ? String(paymentApp) : 'Direct UPI QR',
+        });
+
+        const [portfolio, predictors, adminWalletTransactions] =
+          await Promise.all([
+            getUserPortfolio(result.user.id),
+            getAllProfilesWithPositions(),
+            getAllWalletTransactionsForAdmin(),
+          ]);
+
+        res.json({
+          user: result.user,
+          walletTransaction: result.walletTransaction,
+          utrNumber: result.utrNumber,
+          addedInr: result.addedInr,
+          requestedInr: result.addedInr || result.pendingAmountInr,
+          pendingAmountInr: result.pendingAmountInr,
+          status: result.walletTransaction?.status || 'APPROVED',
+          ownerUpiId: result.ownerUpiId,
+          positions: portfolio.positions,
+          transactions: portfolio.transactions,
+          walletTransactions: portfolio.walletTransactions,
+          adminWalletTransactions,
+          predictors,
+        });
+      } catch (error: any) {
+        console.error('Manual UPI deposit submission error:', error);
+        res
+          .status(400)
+          .json({ error: error.message || 'Failed to add funds via Owner UPI' });
+      }
+    }
+  );
+
+  // 15b. Owner Admin Panel: Approve or Reject/Reverse Manual UPI Deposit
+  app.post(
+    '/api/admin/wallet/deposit-review',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { walletTransactionId, transactionId, decision } = req.body || {};
+        const txId = Number(walletTransactionId || transactionId || 0);
+        if (!txId || !['APPROVED', 'REJECTED'].includes(decision)) {
+          return res.status(400).json({
+            error:
+              'Valid transactionId and decision (APPROVED or REJECTED) required.',
+          });
+        }
+
+        const result = await reviewManualUpiDepositByOwner({
+          adminUid: req.user.uid,
+          adminEmail: req.user.email,
+          walletTransactionId: txId,
+          decision,
+        });
+
+        const [adminProfile, predictors, adminWalletTransactions] =
+          await Promise.all([
+            getUserProfileByUid(req.user.uid, req.user.email),
+            getAllProfilesWithPositions(),
+            getAllWalletTransactionsForAdmin(),
+          ]);
+        const portfolio = adminProfile
+          ? await getUserPortfolio(adminProfile.id)
+          : { positions: [], transactions: [], walletTransactions: [] };
+
+        res.json({
+          ...result,
+          user: adminProfile,
+          positions: portfolio.positions,
+          transactions: portfolio.transactions,
+          walletTransactions: portfolio.walletTransactions,
+          adminWalletTransactions,
+          predictors,
+        });
+      } catch (error: any) {
+        console.error('Admin deposit review error:', error);
+        res.status(403).json({
+          error: error.message || 'Failed to review deposit',
+        });
+      }
+    }
+  );
+
+  // 16. Withdrawal Request System: Submit UPI ID to Request Payout (Saved as PENDING for Owner Manual UPI Transfer)
+  app.post(
+    '/api/wallet/upi-withdraw',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { amountInr, upiId } = req.body || {};
+        const result = await submitUpiWithdrawalRequest({
+          uid: req.user.uid,
+          email: req.user.email,
+          amountInr: Number(amountInr),
+          upiId: String(upiId || ''),
+        });
+
+        const [portfolio, predictors, adminWalletTransactions] =
+          await Promise.all([
+            getUserPortfolio(result.user.id),
+            getAllProfilesWithPositions(),
+            getAllWalletTransactionsForAdmin(),
+          ]);
+
+        res.json({
+          user: result.user,
+          walletTransaction: result.walletTransaction,
+          withdrawnInr: result.withdrawnInr,
+          positions: portfolio.positions,
+          transactions: portfolio.transactions,
+          walletTransactions: portfolio.walletTransactions,
+          adminWalletTransactions,
+          predictors,
+        });
+      } catch (error: any) {
+        console.error('UPI withdrawal request error:', error);
+        res.status(400).json({
+          error: error.message || 'Failed to submit withdrawal request',
+        });
+      }
+    }
+  );
+
+  // 16b. Owner Admin Panel: Mark Withdrawal Request Completed (or Reject & Refund)
+  app.post(
+    '/api/admin/wallet/withdraw-review',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const {
+          walletTransactionId,
+          transactionId,
+          decision,
+          payoutUtrNumber,
+        } = req.body || {};
+        const txId = Number(walletTransactionId || transactionId || 0);
+        if (!txId || !['COMPLETED', 'REJECTED'].includes(decision)) {
+          return res.status(400).json({
+            error:
+              'Valid transactionId and decision (COMPLETED or REJECTED) required.',
+          });
+        }
+
+        const result = await reviewUpiWithdrawalByOwner({
+          adminUid: req.user.uid,
+          adminEmail: req.user.email,
+          walletTransactionId: txId,
+          decision,
+          payoutUtrNumber: payoutUtrNumber
+            ? String(payoutUtrNumber)
+            : undefined,
+        });
+
+        const [adminProfile, predictors, adminWalletTransactions] =
+          await Promise.all([
+            getUserProfileByUid(req.user.uid, req.user.email),
+            getAllProfilesWithPositions(),
+            getAllWalletTransactionsForAdmin(),
+          ]);
+        const portfolio = adminProfile
+          ? await getUserPortfolio(adminProfile.id)
+          : { positions: [], transactions: [], walletTransactions: [] };
+
+        res.json({
+          ...result,
+          user: adminProfile,
+          positions: portfolio.positions,
+          transactions: portfolio.transactions,
+          walletTransactions: portfolio.walletTransactions,
+          adminWalletTransactions,
+          predictors,
+        });
+      } catch (error: any) {
+        console.error('Admin withdrawal review error:', error);
+        res.status(403).json({
+          error: error.message || 'Failed to update withdrawal request',
+        });
+      }
+    }
+  );
+
+  // 17. Cryptographic UPI Payment Gateway Signature Verification (`/api/wallet/verify-payment`)
+  app.post(
+    '/api/wallet/verify-payment',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { amountInr, orderId, paymentId, signature } = req.body || {};
+        const result = await verifyAndCreditGatewayPayment({
+          uid: req.user.uid,
+          email: req.user.email,
+          amountInr: Number(amountInr),
+          orderId: String(orderId || ''),
+          paymentId: String(paymentId || ''),
+          signature: String(signature || ''),
+        });
+        const portfolio = await getUserPortfolio(result.user.id);
+        res.json({
+          user: result.user,
+          walletTransaction: result.walletTransaction,
+          positions: portfolio.positions,
+          transactions: portfolio.transactions,
+          walletTransactions: portfolio.walletTransactions,
+        });
+      } catch (error: any) {
+        console.error('Gateway payment verification error:', error);
+        res.status(400).json({
+          error: error.message || 'Payment signature verification failed',
+        });
+      }
+    }
+  );
+
+  // 18. Cryptographic Webhook Endpoint for `payment.captured` (`/api/wallet/webhook`)
+  app.post('/api/wallet/webhook', async (req, res) => {
     try {
-      if (!req.user) {
-        return res.status(401).json({ error: 'Unauthorized' });
+      const webhookSecret = process.env.WEBHOOK_SECRET;
+      const signature = req.headers['x-razorpay-signature'] as string;
+      if (!webhookSecret || !signature) {
+        return res
+          .status(400)
+          .json({ error: 'Missing WEBHOOK_SECRET or signature header' });
       }
-      const { role } = req.body || {};
-      if (!['user', 'creator', 'admin'].includes(role)) {
-        return res.status(400).json({ error: 'Invalid role' });
+      const rawBody = JSON.stringify(req.body || {});
+      const expectedSig = crypto
+        .createHmac('sha256', webhookSecret)
+        .update(rawBody)
+        .digest('hex');
+      if (expectedSig !== signature) {
+        return res.status(401).json({ error: 'Invalid webhook signature' });
       }
-      const updated = await selfSwitchDemoRole(req.user.uid, role, req.user.email);
-      res.json({ user: updated });
+      res.json({ received: true });
     } catch (error: any) {
-      console.error('Role switch error:', error);
-      res.status(400).json({ error: error.message || 'Failed to switch role' });
+      res.status(400).json({ error: error.message || 'Webhook error' });
     }
   });
 
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: true },
-      appType: 'spa',
+  const distPath = path.join(process.cwd(), 'dist');
+  const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
+  const isTsxDevRuntime =
+    process.execArgv.some((arg) => arg.includes('tsx')) ||
+    Boolean(process.env._ && process.env._.includes('tsx'));
+  const isProductionRuntime =
+    process.env.NODE_ENV === 'production' ||
+    process.cwd().startsWith('/srv') ||
+    process.env.npm_lifecycle_event === 'start' ||
+    (!isTsxDevRuntime && hasBuiltDist);
+
+  if (!isProductionRuntime) {
+    const vitePromise = import('vite')
+      .then(({ createServer }) =>
+        createServer({
+          server: { middlewareMode: true, allowedHosts: true },
+          appType: 'spa',
+        })
+      )
+      .catch((err) => {
+        console.error(
+          'Vite dev server initialization error, falling back to static dist if available:',
+          err
+        );
+        return null;
+      });
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = await vitePromise;
+        if (vite) {
+          vite.middlewares(req, res, next);
+        } else if (hasBuiltDist) {
+          express.static(distPath)(req, res, () => {
+            res.sendFile(path.join(distPath, 'index.html'));
+          });
+        } else {
+          next();
+        }
+      } catch (err) {
+        next(err);
+      }
     });
-    app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

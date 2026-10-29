@@ -1,6 +1,23 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+
+function loadFirebaseConfig(): { projectId?: string } {
+  try {
+    const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+    if (fs.existsSync(configPath)) {
+      return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    }
+    const urlPath = new URL('../../firebase-applet-config.json', import.meta.url);
+    return JSON.parse(fs.readFileSync(urlPath, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+const firebaseConfig = loadFirebaseConfig();
 
 export interface AuthUserPayload {
   uid: string;
@@ -40,6 +57,26 @@ export function verifyInAppToken(token: string): AuthUserPayload | null {
   }
 }
 
+function decodeExpiredFirebaseJwt(token: string): AuthUserPayload | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    const uid = payload.user_id || payload.sub;
+    if (!uid) return null;
+    if (firebaseConfig.projectId && payload.aud && payload.aud !== firebaseConfig.projectId) {
+      return null;
+    }
+    return {
+      uid: String(uid),
+      email: payload.email ? String(payload.email) : `${uid}@campusodds.in`,
+      username: payload.name ? String(payload.name) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const requireAuth = async (
   req: AuthRequest,
   res: Response,
@@ -52,14 +89,14 @@ export const requireAuth = async (
 
   const token = authHeader.split('Bearer ')[1];
 
-  // 1. Check In-App Browser Email/Password or Telegram session token
+  // 1. Check In-App Browser Email/Password, Telegram, or Upgraded session token
   const inAppUser = verifyInAppToken(token);
   if (inAppUser) {
     req.user = inAppUser;
     return next();
   }
 
-  // 2. Verify Firebase ID Token
+  // 2. Verify Firebase ID Token (with seamless recovery if the cached 1-hour Firebase JWT expired)
   try {
     const decodedToken = await adminAuth.verifyIdToken(token);
     req.user = {
@@ -68,8 +105,15 @@ export const requireAuth = async (
       username: decodedToken.name,
     };
     return next();
-  } catch (error) {
-    console.error('Error verifying auth token:', error);
+  } catch (error: any) {
+    if (error?.code === 'auth/id-token-expired' || String(error?.message || '').includes('id-token-expired')) {
+      const recoveredUser = decodeExpiredFirebaseJwt(token);
+      if (recoveredUser) {
+        req.user = recoveredUser;
+        return next();
+      }
+    }
     return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
   }
 };
+

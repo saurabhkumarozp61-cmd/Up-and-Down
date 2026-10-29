@@ -10,6 +10,11 @@ import {
   Briefcase,
   LogOut,
   GraduationCap,
+  Clock,
+  IndianRupee,
+  Lock,
+  TrendingUp,
+  ArrowUpRight,
 } from 'lucide-react';
 import {
   UserProfile,
@@ -17,6 +22,11 @@ import {
   TransactionItem,
   FlexCardData,
 } from '../types.ts';
+import {
+  checkDailyClaimEligibility,
+  isOwnerEmail,
+  isRealMoneyEligible,
+} from '../utils/marketMath.ts';
 
 interface PortfolioViewProps {
   user: UserProfile | null;
@@ -27,6 +37,11 @@ interface PortfolioViewProps {
   onOpenAuth: () => void;
   onLogout: () => void;
   onOpenFlexCard: (data: FlexCardData) => void;
+  onOpenUpiWallet: () => void;
+  onSellPositionEarly?: (
+    positionId: number,
+    sharesToSell: number
+  ) => Promise<void>;
 }
 
 export const PortfolioView: React.FC<PortfolioViewProps> = ({
@@ -38,9 +53,19 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
   onOpenAuth,
   onLogout,
   onOpenFlexCard,
+  onOpenUpiWallet,
+  onSellPositionEarly,
 }) => {
   const [copiedRef, setCopiedRef] = useState(false);
   const [subTab, setSubTab] = useState<'positions' | 'history'>('positions');
+  const [sellingPositionId, setSellingPositionId] = useState<number | null>(
+    null
+  );
+  const [sellPercentByPos, setSellPercentByPos] = useState<
+    Record<number, number>
+  >({});
+  const [sellStatusBanner, setSellStatusBanner] = useState<string | null>(null);
+  const [sellErrorBanner, setSellErrorBanner] = useState<string | null>(null);
 
   if (!user) {
     return (
@@ -53,8 +78,9 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             Track Your Campus Portfolio
           </h2>
           <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
-            Sign up in 10 seconds to claim 1,000 Free Virtual Coins, track active YES/NO
-            positions, and represent your college on the national leaderboard.
+            Sign up in 10 seconds to claim 1,000 Free Virtual Coins, track
+            active YES/NO positions, and book profit anytime before final
+            resolution.
           </p>
         </div>
         <button
@@ -73,11 +99,14 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     (sum, p) => sum + (p.currentValue || 0),
     0
   );
-  const totalNetWorth = user.coinBalance + activePortfolioValue;
   const winRate =
     user.resolvedCount > 0
       ? Math.round((user.winsCount / user.resolvedCount) * 100)
       : 0;
+
+  const dailyEligibility = checkDailyClaimEligibility(user.lastDailyClaim);
+  const isOwner = isOwnerEmail(user.email);
+  const realMoneyEligible = isRealMoneyEligible(user);
 
   const referralLink = `${window.location.origin}/?ref=${encodeURIComponent(
     user.username
@@ -93,15 +122,63 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
     }
   };
 
+  const handleEarlyExitSell = async (pos: PositionItem) => {
+    if (!onSellPositionEarly) return;
+    setSellErrorBanner(null);
+    setSellStatusBanner(null);
+    const pct = sellPercentByPos[pos.id] ?? 100;
+    const sharesHeld = Number(pos.sharesQuantity || pos.shares / 100 || 0);
+    const sharesToSell =
+      pct === 100
+        ? sharesHeld
+        : Number(((sharesHeld * pct) / 100).toFixed(4));
+    if (sharesToSell <= 0) return;
+
+    setSellingPositionId(pos.id);
+    try {
+      await onSellPositionEarly(pos.id, sharesToSell);
+      const estPayout = Number((sharesToSell * pos.currentPrice).toFixed(2));
+      const unitLabel = pos.walletType === 'REAL_INR' ? '₹' : 'Coins ';
+      setSellStatusBanner(
+        `Early Exit executed! Sold ${sharesToSell} ${pos.side} shares at live price ₹${pos.currentPrice} — Credited ${unitLabel}${estPayout.toLocaleString(
+          'en-IN'
+        )} immediately to your wallet!`
+      );
+    } catch (err: any) {
+      setSellErrorBanner(err.message || 'Early exit sell failed');
+    } finally {
+      setSellingPositionId(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
+      {sellStatusBanner && (
+        <div
+          data-testid="early-exit-status-banner"
+          className="p-3.5 rounded-2xl bg-emerald-500/15 border border-emerald-500/40 text-xs font-semibold text-emerald-300"
+        >
+          {sellStatusBanner}
+        </div>
+      )}
+
+      {sellErrorBanner && (
+        <div className="p-3.5 rounded-2xl bg-rose-500/15 border border-rose-500/40 text-xs font-semibold text-rose-200">
+          {sellErrorBanner}
+        </div>
+      )}
+
       {/* User Identity & Net Worth Card */}
-      <div className="bg-[#131B2E] border border-[#1E293B] rounded-2xl p-4">
-        <div className="flex items-start justify-between gap-2 mb-4">
+      <div className="bg-[#131B2E] border border-[#1E293B] rounded-2xl p-4 space-y-3">
+        <div className="flex items-start justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold text-white">@{user.username}</h2>
-              <span className="text-xs text-slate-400">· {user.role.toUpperCase()}</span>
+              <h2 className="text-base font-bold text-white">
+                @{user.username}
+              </h2>
+              <span className="text-xs text-emerald-400 font-semibold">
+                · {isOwner ? 'OWNER & ADMIN' : user.role.toUpperCase()}
+              </span>
             </div>
             <p className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
               <GraduationCap className="w-3.5 h-3.5 text-[#10B981]" />
@@ -122,24 +199,46 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
 
         <div className="grid grid-cols-3 gap-2.5 p-3 rounded-xl bg-[#090D16] border border-[#1E293B]">
           <div>
-            <p className="text-[11px] text-slate-400">Net Worth</p>
-            <p className="text-sm font-bold font-mono-tabular text-[#10B981]">
-              {totalNetWorth.toLocaleString()}
+            <p className="text-[11px] text-slate-400">UPI Real ₹</p>
+            <p className="text-sm font-bold font-mono-tabular text-emerald-400">
+              ₹
+              {Number(
+                user.walletBalanceInr ?? user.realMoneyBalance ?? 0
+              ).toLocaleString('en-IN')}
             </p>
           </div>
           <div>
-            <p className="text-[11px] text-slate-400">Available Cash</p>
+            <p className="text-[11px] text-slate-400">Virtual Coins</p>
             <p className="text-sm font-bold font-mono-tabular text-white">
               {user.coinBalance.toLocaleString()}
             </p>
           </div>
           <div>
-            <p className="text-[11px] text-slate-400">Active Value</p>
+            <p className="text-[11px] text-slate-400">Live Exit Value</p>
             <p className="text-sm font-bold font-mono-tabular text-amber-300">
-              {activePortfolioValue.toLocaleString()} ({winRate}% W)
+              ₹{Math.round(activePortfolioValue).toLocaleString('en-IN')} (
+              {winRate}% W)
             </p>
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={onOpenUpiWallet}
+          className="w-full min-h-[42px] px-3.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-bold text-xs flex items-center justify-center gap-2 transition-colors"
+        >
+          {realMoneyEligible ? (
+            <>
+              <IndianRupee className="w-4 h-4" />
+              <span>Add Real Money via UPI QR &amp; Open Bet Calculator</span>
+            </>
+          ) : (
+            <>
+              <Lock className="w-3.5 h-3.5 text-amber-400" />
+              <span>Invite-Only Real Money UPI Wallet &amp; Calculator</span>
+            </>
+          )}
+        </button>
       </div>
 
       {/* Vault Refill & Viral Referral Loop Card */}
@@ -156,31 +255,44 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
             <span>
               {user.coinBalance < 50
                 ? 'Out of Coins? Refill Your Campus Vault!'
-                : 'Campus Vault & Referral Drops'}
+                : 'Daily 100 Coin Claim & Friend Referral'}
             </span>
           </h3>
           <span className="text-xs font-mono-tabular text-amber-300">
-            +500 / Friend
+            1x / Day · +500 / Friend
           </span>
         </div>
 
         <p className="text-xs text-slate-300 mb-3 leading-relaxed">
-          Claim a Daily 100 Coin Login Drop or share your invite link on WhatsApp /
-          Insta DMs to earn <strong className="text-white">+500 Bonus Coins</strong> for
-          both you and your classmate.
+          Claim your Daily 100 Coin Drop (once every 24h) or share your invite
+          link to earn <strong className="text-white">+500 Bonus Coins</strong>{' '}
+          per friend.
         </p>
 
         <div className="grid grid-cols-2 gap-2.5">
           <button
             type="button"
-            disabled={isClaimingRefill}
+            disabled={isClaimingRefill || !dailyEligibility.canClaim}
             onClick={onClaimRefill}
-            className="min-h-[44px] px-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50"
+            className={`min-h-[44px] px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-colors ${
+              dailyEligibility.canClaim
+                ? 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+                : 'bg-[#090D16] border border-[#1E293B] text-slate-400 cursor-not-allowed'
+            }`}
           >
-            <Sparkles className="w-4 h-4" />
-            <span>
-              {isClaimingRefill ? 'Claiming...' : 'Claim +100 Daily Drop'}
-            </span>
+            {dailyEligibility.canClaim ? (
+              <>
+                <Sparkles className="w-4 h-4" />
+                <span>
+                  {isClaimingRefill ? 'Claiming...' : 'Claim +100 Daily Coins'}
+                </span>
+              </>
+            ) : (
+              <>
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+                <span>Next in {dailyEligibility.remainingLabel}</span>
+              </>
+            )}
           </button>
 
           <button
@@ -228,7 +340,7 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
           }`}
         >
           <History className="w-3.5 h-3.5 text-sky-400" />
-          <span>Coin Ledger ({transactions.length})</span>
+          <span>Passbook &amp; Ledger ({transactions.length})</span>
         </button>
       </div>
 
@@ -236,10 +348,30 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
         <div className="space-y-2.5">
           {positions.length === 0 ? (
             <div className="bg-[#131B2E] border border-[#1E293B] rounded-2xl p-6 text-center text-xs text-slate-400">
-              No active positions yet. Back a YES or NO outcome on the Markets tab!
+              No active positions yet. Back a YES or NO outcome on the Markets
+              tab!
             </div>
           ) : (
             positions.map((pos) => {
+              const isRealInr = pos.walletType === 'REAL_INR';
+              const sharesHeld = Number(
+                pos.sharesQuantity || pos.shares / 100 || 0
+              );
+              const selectedSellPct = sellPercentByPos[pos.id] ?? 100;
+              const sharesToSell =
+                selectedSellPct === 100
+                  ? sharesHeld
+                  : Number(((sharesHeld * selectedSellPct) / 100).toFixed(4));
+              const liveExitPayout = Number(
+                (sharesToSell * pos.currentPrice).toFixed(2)
+              );
+              const costOfSold = Number(
+                (sharesToSell * pos.entryPrice).toFixed(2)
+              );
+              const liveExitPnl = Number(
+                (liveExitPayout - costOfSold).toFixed(2)
+              );
+
               const retPct =
                 pos.investedCoins > 0
                   ? Math.round(
@@ -252,16 +384,28 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               return (
                 <div
                   key={pos.id}
+                  data-testid={`portfolio-position-card-${pos.id}`}
                   className="bg-[#131B2E] border border-[#1E293B] rounded-2xl p-3.5 space-y-2.5"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <p className="text-xs text-slate-400 mb-0.5">
-                        {pos.marketCategory} ·{' '}
-                        {pos.settled
-                          ? `Settled (${pos.payoutCoins} Coins Paid)`
-                          : 'Active Position'}
-                      </p>
+                      <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                        <span className="text-xs text-slate-400">
+                          {pos.marketCategory} ·{' '}
+                          {pos.exitedEarly
+                            ? `Sold Early @ ₹${pos.exitPrice || pos.currentPrice}`
+                            : pos.settled
+                            ? isRealInr
+                              ? `Settled (₹${pos.payoutCoins} Paid)`
+                              : `Settled (${pos.payoutCoins} Coins Paid)`
+                            : 'Active Open Position'}
+                        </span>
+                        {isRealInr && (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-bold text-emerald-300">
+                            ₹ REAL MONEY
+                          </span>
+                        )}
+                      </div>
                       <h4 className="text-sm font-semibold text-white leading-snug">
                         {pos.marketTitle}
                       </h4>
@@ -283,7 +427,10 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                           collegeName: user.collegeName,
                         })
                       }
-                      aria-label={`Share flex card for ${pos.marketTitle.slice(0, 24)}`}
+                      aria-label={`Share flex card for ${pos.marketTitle.slice(
+                        0,
+                        24
+                      )}`}
                       className="min-h-[36px] px-2.5 rounded-xl bg-[#090D16] hover:bg-slate-800 border border-[#1E293B] text-xs font-semibold text-emerald-400 flex items-center gap-1 shrink-0"
                     >
                       <Share2 className="w-3.5 h-3.5" />
@@ -291,30 +438,115 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 text-xs font-mono-tabular">
+                  <div className="grid grid-cols-4 gap-2 pt-2 border-t border-slate-800/80 text-xs font-mono-tabular">
                     <div>
-                      <span className="text-slate-400 block">Side &amp; Odds</span>
+                      <span className="text-slate-400 block">
+                        Side &amp; Entry
+                      </span>
                       <span
                         className={`font-bold ${
-                          pos.side === 'YES' ? 'text-[#10B981]' : 'text-[#F43F5E]'
+                          pos.side === 'YES'
+                            ? 'text-[#10B981]'
+                            : 'text-[#F43F5E]'
                         }`}
                       >
-                        {pos.side} @ {pos.entryPrice}%
+                        {pos.side} @ ₹{pos.entryPrice}
                       </span>
                     </div>
                     <div>
-                      <span className="text-slate-400 block">Invested</span>
+                      <span className="text-slate-400 block">Shares Held</span>
+                      <span className="font-bold text-emerald-300">
+                        {sharesHeld} sh
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block">Live Price</span>
                       <span className="font-semibold text-white">
-                        {pos.investedCoins.toLocaleString()} Coins
+                        ₹{pos.currentPrice}
                       </span>
                     </div>
                     <div>
-                      <span className="text-slate-400 block">Win Payout</span>
+                      <span className="text-slate-400 block">Win @ ₹100</span>
                       <span className="font-bold text-[#10B981]">
-                        {pos.potentialPayout.toLocaleString()} Coins
+                        {isRealInr
+                          ? `₹${pos.potentialPayout.toLocaleString('en-IN')}`
+                          : `${pos.potentialPayout.toLocaleString()} C`}
                       </span>
                     </div>
                   </div>
+
+                  {/* EARLY EXIT (SELL BEFORE FINAL RESULT / PROFIT BOOKING & STOP-LOSS) */}
+                  {!pos.settled &&
+                    pos.marketStatus === 'open' &&
+                    sharesHeld > 0 &&
+                    onSellPositionEarly && (
+                      <div
+                        data-testid={`early-exit-box-${pos.id}`}
+                        className="p-3 rounded-xl bg-[#090D16] border border-[#1E293B] space-y-2 text-xs"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-sky-300 flex items-center gap-1">
+                            <TrendingUp className="w-3.5 h-3.5" />
+                            <span>
+                              Early Exit (Book Profit / Stop-Loss @ Live ₹
+                              {pos.currentPrice})
+                            </span>
+                          </span>
+                          <span
+                            className={`font-mono-tabular font-bold ${
+                              liveExitPnl >= 0
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }`}
+                          >
+                            {liveExitPnl >= 0 ? '+' : ''}
+                            {isRealInr ? '₹' : ''}
+                            {liveExitPnl} P&amp;L
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-4 gap-1.5">
+                          {[25, 50, 75, 100].map((pct) => (
+                            <button
+                              key={pct}
+                              type="button"
+                              onClick={() =>
+                                setSellPercentByPos((prev) => ({
+                                  ...prev,
+                                  [pos.id]: pct,
+                                }))
+                              }
+                              className={`min-h-[30px] rounded-lg font-mono-tabular font-bold text-[11px] border ${
+                                selectedSellPct === pct
+                                  ? 'bg-sky-500/20 border-sky-400 text-sky-300'
+                                  : 'bg-[#131B2E] border-[#1E293B] text-slate-400'
+                              }`}
+                            >
+                              {pct === 100 ? '100% All' : `${pct}%`}
+                            </button>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={sellingPositionId === pos.id}
+                          data-testid={`early-exit-sell-btn-${pos.id}`}
+                          onClick={() => handleEarlyExitSell(pos)}
+                          className="w-full min-h-[38px] rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+                        >
+                          <ArrowUpRight className="w-4 h-4" />
+                          <span>
+                            {sellingPositionId === pos.id
+                              ? 'Selling Position at Live Market Price...'
+                              : `Sell ${sharesToSell} sh Now · Credit ${
+                                  isRealInr ? '₹' : ''
+                                }${liveExitPayout.toLocaleString('en-IN')}${
+                                  isRealInr ? '' : ' Coins'
+                                }`}
+                          </span>
+                        </button>
+                      </div>
+                    )}
                 </div>
               );
             })
@@ -327,28 +559,37 @@ export const PortfolioView: React.FC<PortfolioViewProps> = ({
               No transactions recorded yet.
             </div>
           ) : (
-            transactions.map((tx) => (
-              <div
-                key={tx.id}
-                className="p-3.5 flex items-center justify-between gap-3"
-              >
-                <div className="min-w-0">
-                  <p className="text-xs font-semibold text-white truncate">
-                    {tx.description}
-                  </p>
-                  <p className="text-[11px] text-slate-400">
-                    {tx.type.replace(/_/g, ' ')}
-                  </p>
-                </div>
-                <span
-                  className={`text-xs font-mono-tabular font-bold shrink-0 ${
-                    tx.amount >= 0 ? 'text-[#10B981]' : 'text-slate-300'
-                  }`}
+            transactions.map((tx) => {
+              const isRealTx = tx.type.startsWith('REAL_');
+              return (
+                <div
+                  key={tx.id}
+                  className="p-3.5 flex items-center justify-between gap-3"
                 >
-                  {tx.amount >= 0 ? `+${tx.amount}` : tx.amount} Coins
-                </span>
-              </div>
-            ))
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-white truncate">
+                      {tx.description}
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      {tx.type.replace(/_/g, ' ')}
+                    </p>
+                  </div>
+                  <span
+                    className={`text-xs font-mono-tabular font-bold shrink-0 ${
+                      tx.amount >= 0 ? 'text-[#10B981]' : 'text-slate-300'
+                    }`}
+                  >
+                    {isRealTx
+                      ? `${tx.amount >= 0 ? '+' : '-'}₹${Math.abs(
+                          tx.amount
+                        ).toLocaleString('en-IN')}`
+                      : `${
+                          tx.amount >= 0 ? `+${tx.amount}` : tx.amount
+                        } Coins`}
+                  </span>
+                </div>
+              );
+            })
           )}
         </div>
       )}

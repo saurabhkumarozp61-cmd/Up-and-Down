@@ -3,6 +3,7 @@
   "appId": "1:562921255709:web:3f78c6260472f03fe227f4",
   "apiKey": "AIzaSyAQd7r93o_2RpEVEc7ued5a5E0pLdbbRdw",
   "authDomain": "affable-particle-901dl.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-updown-3f7696b0-11eb-4bed-8a21-430feb74a374",
   "storageBucket": "affable-particle-901dl.firebasestorage.app",
   "messagingSenderId": "562921255709",
   "measurementId": "",

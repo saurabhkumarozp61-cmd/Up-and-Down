@@ -2,7 +2,8 @@
 
 @layer base {
   :root {
-    --font-display: 'Outfit', system-ui, -apple-system, sans-serif;
+    --font-condensed: 'Barlow Condensed', system-ui, -apple-system, sans-serif;
+    --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
   }
@@ -12,16 +13,127 @@
     background-color: #090D16;
     color: #F8FAFC;
     overflow-x: hidden;
+    transition: background-color 0.2s ease, color 0.2s ease;
   }
 
   h1, h2, h3, .font-display {
     font-family: var(--font-display);
   }
 
+  .font-condensed {
+    font-family: var(--font-condensed);
+    letter-spacing: 0.01em;
+  }
+
   .font-mono-tabular {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
+}
+
+/* Signature Polymarket Play Store Combo Gradient & Royal Blue Pill */
+.poly-gradient-btn {
+  background: linear-gradient(90deg, #10B981 0%, #6366F1 52%, #A855F7 100%);
+  color: #FFFFFF !important;
+}
+.poly-gradient-btn:hover {
+  filter: brightness(1.06);
+}
+
+.poly-blue-pill {
+  background-color: #2563EB !important;
+  border-color: #1D4ED8 !important;
+  color: #FFFFFF !important;
+}
+.poly-blue-pill:hover {
+  background-color: #1D4ED8 !important;
+}
+
+/* Polymarket Play Store Daylight (Light) Theme Overrides */
+html[data-theme="light"] body {
+  background-color: #E2E8F0;
+  color: #0F172A;
+}
+
+html[data-theme="light"] .bg-\[\#090D16\] {
+  background-color: #F1F5F9 !important;
+}
+
+html[data-theme="light"] .bg-\[\#090D16\]\/85,
+html[data-theme="light"] .bg-\[\#090D16\]\/95,
+html[data-theme="light"] .bg-\[\#090D16\]\/80 {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+}
+
+html[data-theme="light"] .bg-\[\#131B2E\] {
+  background-color: #FFFFFF !important;
+  box-shadow: 0 4px 16px -4px rgba(15, 23, 42, 0.06);
+}
+
+html[data-theme="light"] .from-\[\#131B2E\] {
+  --tw-gradient-from: #FFFFFF !important;
+  --tw-gradient-to: #EEF2FF !important;
+}
+
+html[data-theme="light"] .border-\[\#1E293B\],
+html[data-theme="light"] .border-slate-800\/60,
+html[data-theme="light"] .border-slate-800\/80,
+html[data-theme="light"] .border-slate-800,
+html[data-theme="light"] .border-slate-700 {
+  border-color: #CBD5E1 !important;
+}
+
+html[data-theme="light"] .divide-\[\#1E293B\] > :not([hidden]) ~ :not([hidden]) {
+  border-color: #E2E8F0 !important;
+}
+
+html[data-theme="light"] .text-white:not(.poly-blue-pill):not(.poly-gradient-btn):not(.bg-\[\#F43F5E\]) {
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .text-slate-50,
+html[data-theme="light"] .text-slate-200 {
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .text-slate-300 {
+  color: #334155 !important;
+}
+
+html[data-theme="light"] .text-slate-400,
+html[data-theme="light"] .text-slate-500 {
+  color: #475569 !important;
+}
+
+html[data-theme="light"] .bg-slate-800,
+html[data-theme="light"] .bg-slate-800\/70,
+html[data-theme="light"] .bg-slate-800\/50 {
+  background-color: #E2E8F0 !important;
+  color: #0F172A !important;
+}
+
+html[data-theme="light"] .text-emerald-200,
+html[data-theme="light"] .text-emerald-300,
+html[data-theme="light"] .text-emerald-400,
+html[data-theme="light"] .text-\[\#10B981\] {
+  color: #059669 !important;
+}
+
+html[data-theme="light"] .text-rose-200,
+html[data-theme="light"] .text-rose-300,
+html[data-theme="light"] .text-\[\#F43F5E\] {
+  color: #E11D48 !important;
+}
+
+html[data-theme="light"] .text-amber-200,
+html[data-theme="light"] .text-amber-300,
+html[data-theme="light"] .text-amber-400 {
+  color: #B45309 !important;
+}
+
+html[data-theme="light"] .text-sky-300,
+html[data-theme="light"] .text-sky-400 {
+  color: #1D4ED8 !important;
 }
 
 /* Subtle custom scrollbars for horizontal category tabs */
