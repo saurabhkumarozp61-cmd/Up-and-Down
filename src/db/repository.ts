@@ -30,6 +30,7 @@ import {
   type TradeSide,
   type WalletMode,
 } from '../utils/marketMath.ts';
+import { createRazorpayOrder } from '../utils/razorpay.ts';
 
 let isSeedingChecked = false;
 
@@ -2682,6 +2683,76 @@ export async function getAllWalletTransactionsForAdmin() {
       error
     );
     return [];
+  }
+}
+
+/** Creates a provider order, then persists its pending ledger row before exposing checkout details. */
+export async function createGatewayPaymentOrder(params: {
+  uid: string;
+  email?: string;
+  amountInr: number;
+}) {
+  if (process.env.PAYMENT_GATEWAY_ENABLED !== 'true') {
+    throw new Error('Payment gateway deposits are disabled until explicitly configured.');
+  }
+
+  const keyId = process.env.PAYMENT_KEY_ID;
+  const keySecret = process.env.PAYMENT_KEY_SECRET;
+  if (!keyId || !keySecret) {
+    throw new Error('Payment gateway credentials are not configured.');
+  }
+
+  const user = await getUserProfileByUid(params.uid, params.email);
+  if (!user) throw new Error('User profile not found.');
+  if (!isRealMoneyEligible(user)) {
+    throw new Error('Real Money UPI deposits are invite-only.');
+  }
+
+  const amount = calculateUpiDepositSummary(params.amountInr);
+  if (!amount.valid) throw new Error(amount.error || 'Invalid payment amount.');
+  const amountPaise = Math.round(amount.amountInr * 100);
+  const receipt = crypto.randomUUID();
+
+  const providerOrder = await createRazorpayOrder({
+    keyId,
+    keySecret,
+    amountPaise,
+    receipt,
+  });
+
+  try {
+    const rows = await db
+      .insert(walletTransactions)
+      .values({
+        userId: user.id,
+        username: user.username,
+        userEmail: user.email,
+        type: 'DEPOSIT',
+        status: 'PENDING',
+        amountInr: amount.amountInr,
+        gatewayOrderId: providerOrder.id,
+        notes: 'Razorpay order pending provider-verified capture; no wallet funds credited yet.',
+      })
+      .returning();
+
+    if (rows.length !== 1) {
+      throw new Error('Payment order could not be recorded; no checkout details were returned.');
+    }
+
+    return {
+      paymentKeyId: keyId,
+      order: providerOrder,
+      walletTransaction: rows[0],
+    };
+  } catch (error: any) {
+    if (error?.code === '23505') {
+      throw new Error('The payment order could not be recorded uniquely; no wallet funds were credited.', {
+        cause: error,
+      });
+    }
+    throw new Error('The payment order could not be recorded; no checkout details were returned.', {
+      cause: error,
+    });
   }
 }
 

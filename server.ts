@@ -11,6 +11,7 @@ import {
 import {
   claimDailyRefillCoins,
   createInAppInviteCodeByOwner,
+  createGatewayPaymentOrder,
   createMarketByCreatorOrAdmin,
   getAllMarkets,
   getAllProfilesWithPositions,
@@ -1170,7 +1171,36 @@ async function startServer() {
     }
   );
 
-  // 17. Cryptographic UPI Payment Gateway Signature Verification (`/api/wallet/verify-payment`)
+  // 17. Create a provider order bound to the authenticated user and exact amount.
+  app.post(
+    '/api/wallet/create-order',
+    requireAuth,
+    async (req: AuthRequest, res) => {
+      try {
+        if (!req.user) {
+          return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const { amountInr } = req.body || {};
+        const result = await createGatewayPaymentOrder({
+          uid: req.user.uid,
+          email: req.user.email,
+          amountInr: Number(amountInr),
+        });
+        res.json({
+          paymentKeyId: result.paymentKeyId,
+          order: result.order,
+          walletTransaction: result.walletTransaction,
+        });
+      } catch (error: any) {
+        console.error('Gateway order creation error:', error);
+        res.status(400).json({
+          error: error.message || 'Could not create a payment order.',
+        });
+      }
+    }
+  );
+
+  // 18. Cryptographic UPI Payment Gateway Signature Verification (`/api/wallet/verify-payment`)
   app.post(
     '/api/wallet/verify-payment',
     requireAuth,
@@ -1205,7 +1235,7 @@ async function startServer() {
     }
   );
 
-  // 18. Cryptographic Webhook Endpoint for `payment.captured` (`/api/wallet/webhook`)
+  // 19. Cryptographic Webhook Endpoint for `payment.captured` (`/api/wallet/webhook`)
   app.post('/api/wallet/webhook', async (req, res) => {
     try {
       const webhookSecret = process.env.WEBHOOK_SECRET;
